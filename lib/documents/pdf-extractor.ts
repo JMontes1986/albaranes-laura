@@ -1,6 +1,7 @@
 import { extractText } from 'unpdf';
 import { extractAmbiguousDeliveryData } from '@/lib/ai/groq';
 import { classifyPage, parseDeliveryPage } from './delivery-parser';
+import type { CSVNormalizedRecord } from '@/lib/csv/parser';
 import type { PDFDeliveryNote, PDFItem } from '@/lib/reconciliation/types';
 
 export type ExtractedPdfPage = {
@@ -35,7 +36,48 @@ function mergeItem(note: PDFDeliveryNote, item: PDFItem) {
   if (!exists) note.items.push(item);
 }
 
-export async function extractDeliveryNotesFromPdf(input: Buffer) {
+function searchable(value: string) {
+  return value.normalize('NFKD').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+}
+
+export function findExactCsvMatches(
+  pages: ExtractedPdfPage[],
+  rows: CSVNormalizedRecord[],
+) {
+  const notes = new Map<string, PDFDeliveryNote>();
+  const searchablePages = pages.map((page) => ({
+    pageNumber: page.pageNumber,
+    text: searchable(page.markdown),
+  }));
+
+  for (const row of rows) {
+    const unit = searchable(row.unitNumber);
+    if (unit.length < 6) continue;
+    const matchedPage = searchablePages.find((page) => page.text.includes(unit));
+    if (!matchedPage) continue;
+    const current = notes.get(row.deliveryNoteNumber) ?? {
+      deliveryNoteNumber: row.deliveryNoteNumber,
+      dispatchDate: row.dispatchDate,
+      pageNumber: matchedPage.pageNumber,
+      confidence: 0.99,
+      items: [],
+    };
+    mergeItem(current, {
+      componentCode: row.componentCode,
+      unitNumber: row.unitNumber,
+      bloodGroup: row.bloodGroup,
+      expirationDate: row.expirationDate,
+    });
+    notes.set(row.deliveryNoteNumber, current);
+  }
+
+  return [...notes.values()];
+}
+
+export async function extractDeliveryNotesFromPdf(
+  input: Buffer,
+  expectedRows: CSVNormalizedRecord[] = [],
+) {
   const extracted = await extractText(Uint8Array.from(input));
   const pages: ExtractedPdfPage[] = extracted.text.map((text, index) => ({
     pageNumber: index + 1,
@@ -59,19 +101,41 @@ export async function extractDeliveryNotesFromPdf(input: Buffer) {
     notes.set(parsed.deliveryNoteNumber, current);
   }
 
-  const candidates = pages.filter(
+  for (const exactNote of findExactCsvMatches(pages, expectedRows)) {
+    const current = notes.get(exactNote.deliveryNoteNumber) ?? {
+      ...exactNote,
+      items: [],
+    };
+    for (const item of exactNote.items) mergeItem(current, item);
+    notes.set(exactNote.deliveryNoteNumber, current);
+  }
+
+  const explicitCandidates = pages.filter(
     (page) =>
       page.classification === 'delivery_note' ||
       /ALBAR[AÁ]N|DESPACHO/i.test(page.markdown),
   );
+  const readablePages = pages.filter((page) => page.markdown.trim().length >= 20);
+  const candidates = explicitCandidates.length > 0 ? explicitCandidates : readablePages;
   let aiMetrics: AiMetrics | null = null;
 
   if (candidates.length > 0 && process.env.GROQ_API_KEY) {
+    let remainingCharacters = 120_000;
+    const pageInput = candidates.flatMap((page) => {
+      if (remainingCharacters <= 0) return [];
+      const text = page.markdown.slice(0, Math.min(30_000, remainingCharacters));
+      remainingCharacters -= text.length;
+      return [{ page_number: page.pageNumber, text }];
+    });
     const ai = await extractAmbiguousDeliveryData(
-      candidates.map((page) => ({
-        page_number: page.pageNumber,
-        text: page.markdown.slice(0, 50_000),
-      })),
+      {
+        pages: pageInput,
+        expected_units: expectedRows.slice(0, 500).map((row) => ({
+          delivery_note_number: row.deliveryNoteNumber,
+          component_code: row.componentCode,
+          unit_number: row.unitNumber,
+        })),
+      },
     );
     aiMetrics = ai.metrics;
 
@@ -102,7 +166,13 @@ export async function extractDeliveryNotesFromPdf(input: Buffer) {
   }
 
   const deliveryNotes = [...notes.values()].filter((note) => note.items.length > 0);
-  if (deliveryNotes.length === 0) throw new Error('PDF_NO_DELIVERY_ITEMS');
+  if (deliveryNotes.length === 0) {
+    throw new Error(
+      readablePages.length === 0
+        ? 'PDF_WITHOUT_EXTRACTABLE_TEXT'
+        : 'PDF_NO_DELIVERY_ITEMS',
+    );
+  }
 
   return { pages, deliveryNotes, aiMetrics };
 }

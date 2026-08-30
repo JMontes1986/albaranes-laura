@@ -38,6 +38,8 @@ export async function extractAmbiguousDeliveryData(input: unknown, complex = tru
     system:
       'Eres un motor de extracción de albaranes. No calcules importes ni inventes datos. ' +
       'Extrae exclusivamente las unidades que aparecen en páginas de albarán o despacho. ' +
+      'La entrada puede incluir expected_units como candidatos: devuelve una unidad esperada ' +
+      'solo si su número aparece realmente en el texto del PDF; no asumas que están todas. ' +
       'Conserva literalmente el número de albarán, código de componente y número de unidad. ' +
       'Devuelve las fechas como YYYY-MM-DD. Si un campo no puede determinarse, usa null.',
     prompt: payload,

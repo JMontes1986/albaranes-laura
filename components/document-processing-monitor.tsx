@@ -7,12 +7,14 @@ type Props = {
   hasPendingPair: boolean;
   isProcessing: boolean;
   hasFailed: boolean;
+  failureReason: string;
 };
 
 export function DocumentProcessingMonitor({
   hasPendingPair,
   isProcessing,
   hasFailed,
+  failureReason,
 }: Props) {
   const router = useRouter();
   const attempted = useRef(false);
@@ -77,7 +79,7 @@ export function DocumentProcessingMonitor({
       {hasFailed ? (
         <div>
           <p className="result-error">
-            El análisis falló. Revisa la configuración de IA y vuelve a intentarlo.
+            El análisis falló: {failureReason}
           </p>
           <button className="button" type="button" onClick={retry} disabled={retrying}>
             {retrying ? 'Reintentando…' : 'Reintentar análisis'}

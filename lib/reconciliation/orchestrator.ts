@@ -125,6 +125,10 @@ export async function processClaimedPair(pair: ClaimedPair) {
   let periodId: string | null = null;
 
   try {
+    console.info('[automatic-reconciliation] started', {
+      pdfDocumentId: pair.pdf.id,
+      csvDocumentId: pair.csv.id,
+    });
     const { data: previousRuns } = await admin
       .from('reconciliations')
       .select('billing_period_id')
@@ -146,11 +150,25 @@ export async function processClaimedPair(pair: ClaimedPair) {
       downloadAndDecrypt(pair.pdf),
       downloadAndDecrypt(pair.csv),
     ]);
+    console.info('[automatic-reconciliation] documents-decrypted', {
+      pdfBytes: pdfBuffer.length,
+      csvBytes: csvBuffer.length,
+    });
     const csvRows = parseUnitsCsv(csvBuffer);
     if (csvRows.length === 0) throw new Error('CSV_EMPTY');
+    console.info('[automatic-reconciliation] csv-parsed', { records: csvRows.length });
 
     await setDocumentStatus(documentIds, 'analyzing');
-    const extraction = await extractDeliveryNotesFromPdf(pdfBuffer);
+    const extraction = await extractDeliveryNotesFromPdf(pdfBuffer, csvRows);
+    console.info('[automatic-reconciliation] pdf-extracted', {
+      pages: extraction.pages.length,
+      deliveryNotes: extraction.deliveryNotes.length,
+      units: extraction.deliveryNotes.reduce(
+        (total, note) => total + note.items.length,
+        0,
+      ),
+      usedAi: Boolean(extraction.aiMetrics),
+    });
     const componentCodes = [
       ...csvRows.map((row) => row.componentCode),
       ...extraction.deliveryNotes.flatMap((note) =>
@@ -310,6 +328,12 @@ export async function processClaimedPair(pair: ClaimedPair) {
     reconciliationId = reconciliation.id;
 
     const result = reconcile(csvRows, extraction.deliveryNotes);
+    console.info('[automatic-reconciliation] reconciled', {
+      total: result.items.length,
+      matches: result.items.filter((item) => item.status === 'MATCH').length,
+      csvOnly: result.items.filter((item) => item.status === 'CSV_ONLY').length,
+      pdfOnly: result.items.filter((item) => item.status === 'PDF_ONLY').length,
+    });
     const csvIds = new Map(
       (storedCsv ?? []).map((row) => [
         key(row.delivery_note_number, row.component_code, row.unit_number),
@@ -357,6 +381,9 @@ export async function processClaimedPair(pair: ClaimedPair) {
         },
       }),
     ]);
+    console.info('[automatic-reconciliation] completed', {
+      reconciliationId: reconciliation.id,
+    });
 
     return { reconciliationId: reconciliation.id, result };
   } catch (cause) {

@@ -22,6 +22,19 @@ function formatBytes(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function processingErrorMessage(error: string | null | undefined) {
+  if (error === 'PDF_NO_DELIVERY_ITEMS') {
+    return 'El PDF se pudo leer, pero no se reconocieron números de unidad del albarán.';
+  }
+  if (error === 'PDF_WITHOUT_EXTRACTABLE_TEXT') {
+    return 'El PDF no contiene texto seleccionable. Necesita procesamiento OCR.';
+  }
+  if (error?.includes('GROQ')) {
+    return 'La extracción con IA no respondió correctamente. Revisa GROQ_API_KEY.';
+  }
+  return error ? `Detalle técnico: ${error}` : 'No se registró el detalle del fallo.';
+}
+
 export default async function DocumentsPage() {
   const supabase = await createSupabaseServerClient();
   const { data: documents, error } = await supabase
@@ -50,6 +63,19 @@ export default async function DocumentsPage() {
   const hasFailed = Boolean(
     latestDocuments.some((document) => document?.status === 'failed'),
   );
+  const latestPdf = documents?.find(
+    (document) => document.document_type === 'pdf_support',
+  );
+  const { data: failedRun } = hasFailed && latestPdf
+    ? await supabase
+        .from('ai_runs')
+        .select('error')
+        .eq('document_id', latestPdf.id)
+        .eq('status', 'failed')
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle()
+    : { data: null };
 
   return (
     <>
@@ -59,6 +85,7 @@ export default async function DocumentsPage() {
         hasPendingPair={hasPendingPair}
         isProcessing={isProcessing}
         hasFailed={hasFailed}
+        failureReason={processingErrorMessage(failedRun?.error)}
       />
       <section className="card documents-list" aria-labelledby="documents-title">
         <h2 id="documents-title">Documentos cargados</h2>
