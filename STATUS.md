@@ -1,10 +1,13 @@
 # Verification status
 
 - Python worker syntax: PASS (`python -m py_compile workers/python/app.py`).
-- `npm install`: NOT COMPLETED in this execution environment because registry access timed out twice.
-- `npm run lint`: NOT RUN; dependencies unavailable.
-- `npm run typecheck`: BLOCKED by missing npm dependencies. Global `tsc` was invoked and only produced unresolved dependency/JSX type errors from the absent `node_modules` in the captured output.
-- `npm test`: NOT RUN; Vitest dependency unavailable.
-- `npm run build`: NOT RUN; Next.js dependency unavailable.
+- Dependencies: INSTALLED from `package-lock.json`.
+- `npm run lint`: PASS.
+- `npm run typecheck`: PASS.
+- `npm test`: PASS.
+- `npm run build`: PASS with Next.js 16.
 
-Do not represent this repository as having passed the four npm gates until they are executed in an environment with npm registry access.
+The document upload UI, encrypted upload route, PDF/CSV validation and document
+listing compile successfully. A real end-to-end upload still requires valid
+Supabase credentials, the private `documents-encrypted` bucket and a 32-byte
+Base64 `FILE_ENCRYPTION_KEY` in the deployment environment.
