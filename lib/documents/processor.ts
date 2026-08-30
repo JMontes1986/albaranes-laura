@@ -1,0 +1,5 @@
+export type PageClass='invoice'|'summary'|'unit_list'|'delivery_note'|'request'|'return_document'|'other';
+export type ProcessedPage={pageNumber:number,classification:PageClass,markdown:string,textSufficient:boolean,needsOcr:boolean};
+export type ProcessedDocument={pages:ProcessedPage[];sha256:string};
+export interface DocumentProcessor{processPdf(input:{path:string;sha256:string}):Promise<ProcessedDocument>}
+export class HttpDocumentProcessor implements DocumentProcessor{constructor(private readonly baseUrl=process.env.DOCUMENT_PROCESSOR_URL!,private readonly token=process.env.DOCUMENT_PROCESSOR_TOKEN!){ }async processPdf(input:{path:string;sha256:string}){const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),120_000);try{const r=await fetch(`${this.baseUrl}/process`,{method:'POST',headers:{'content-type':'application/json','authorization':`Bearer ${this.token}`},body:JSON.stringify(input),signal:controller.signal});if(!r.ok)throw new Error(`DOCUMENT_PROCESSOR_${r.status}`);return await r.json() as ProcessedDocument}finally{clearTimeout(timer)}}}

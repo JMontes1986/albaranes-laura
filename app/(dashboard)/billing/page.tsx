@@ -1,0 +1,1 @@
+export default function Page(){return <><h1>Facturación</h1><div className="card"><p>Módulo preparado para operar sobre Supabase con RLS. La lógica de dominio está desacoplada en <code>lib/</code>.</p></div></>}

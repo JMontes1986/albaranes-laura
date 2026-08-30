@@ -1,0 +1,8 @@
+import crypto from 'node:crypto';
+export type EncryptedFile={ciphertext:Buffer;iv:string;authTag:string;encryptedFileKey:string;keyIv:string;keyAuthTag:string;sha256:string;encryptionVersion:'v1'};
+function masterKey(){const raw=process.env.FILE_ENCRYPTION_KEY;if(!raw)throw new Error('FILE_ENCRYPTION_KEY missing');const b=Buffer.from(raw,'base64');if(b.length!==32)throw new Error('FILE_ENCRYPTION_KEY must be 32 bytes base64');return b}
+function seal(key:Buffer,plain:Buffer){const iv=crypto.randomBytes(12);const c=crypto.createCipheriv('aes-256-gcm',key,iv);const ciphertext=Buffer.concat([c.update(plain),c.final()]);return {ciphertext,iv,authTag:c.getAuthTag()}}
+function open(key:Buffer,ciphertext:Buffer,iv:Buffer,tag:Buffer){const d=crypto.createDecipheriv('aes-256-gcm',key,iv);d.setAuthTag(tag);return Buffer.concat([d.update(ciphertext),d.final()])}
+export function encryptFile(plain:Buffer):EncryptedFile{const fileKey=crypto.randomBytes(32);const file=seal(fileKey,plain);const wrapped=seal(masterKey(),fileKey);return {ciphertext:file.ciphertext,iv:file.iv.toString('base64'),authTag:file.authTag.toString('base64'),encryptedFileKey:wrapped.ciphertext.toString('base64'),keyIv:wrapped.iv.toString('base64'),keyAuthTag:wrapped.authTag.toString('base64'),sha256:crypto.createHash('sha256').update(plain).digest('hex'),encryptionVersion:'v1'}}
+export function decryptFile(data:EncryptedFile){const fileKey=open(masterKey(),Buffer.from(data.encryptedFileKey,'base64'),Buffer.from(data.keyIv,'base64'),Buffer.from(data.keyAuthTag,'base64'));return open(fileKey,data.ciphertext,Buffer.from(data.iv,'base64'),Buffer.from(data.authTag,'base64'))}
+export function generateMasterKey(){return crypto.randomBytes(32).toString('base64')}

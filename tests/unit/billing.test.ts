@@ -1,0 +1,2 @@
+import {describe,it,expect} from 'vitest';import {calculateBilling} from '@/lib/billing/engine';
+describe('billing engine',()=>{it('uses Decimal and excludes non-MATCH rows',()=>{const items:any=[{status:'MATCH',componentCode:'GRPL'},{status:'MATCH',componentCode:'GRPL'},{status:'RETURNED',componentCode:'GRPL'}];const result=calculateBilling(items,[{componentCode:'GRPL',unitPrice:'1234.56'}]);expect(result.total).toBe('2469.12');expect(result.lines[0].quantity).toBe(2)})})

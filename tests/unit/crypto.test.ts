@@ -1,0 +1,2 @@
+import {describe,it,expect,beforeAll} from 'vitest';import {encryptFile,decryptFile} from '@/lib/crypto/files';import crypto from 'node:crypto';
+describe('file encryption',()=>{beforeAll(()=>{process.env.FILE_ENCRYPTION_KEY=crypto.randomBytes(32).toString('base64')});it('round trips AES-256-GCM envelope encryption',()=>{const plain=Buffer.from('dato privado');const enc=encryptFile(plain);expect(enc.ciphertext.equals(plain)).toBe(false);expect(decryptFile(enc).toString()).toBe('dato privado')})})
