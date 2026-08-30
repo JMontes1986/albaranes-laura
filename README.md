@@ -66,7 +66,7 @@ Copiar `.env.example` a `.env.local`.
 - `GROQ_FAST_MODEL=openai/gpt-oss-20b`.
 - `FILE_ENCRYPTION_KEY`: **32 bytes aleatorios codificados Base64**.
 - `APP_URL`: URL local o de Vercel.
-- `MAX_UPLOAD_MB`: límite de archivos.
+- `MAX_UPLOAD_MB`: límite de archivos (máximo efectivo de 4 MB por el límite de peticiones de Vercel Functions).
 - `DOCUMENT_PROCESSOR_URL`: URL interna/privada del worker Python.
 - `DOCUMENT_PROCESSOR_TOKEN`: secreto compartido con el worker.
 

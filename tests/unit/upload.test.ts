@@ -28,4 +28,17 @@ describe('upload validation', () => {
       ),
     ).toThrow('INVALID_PDF_MAGIC');
   });
+
+  it('rejects files above the Vercel request limit', () => {
+    expect(() =>
+      validateUpload(
+        {
+          name: 'grande.pdf',
+          type: 'application/pdf',
+          size: 4 * 1024 * 1024 + 1,
+        },
+        Buffer.from('%PDF-1.7'),
+      ),
+    ).toThrow('FILE_SIZE_INVALID');
+  });
 });
