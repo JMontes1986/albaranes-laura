@@ -131,9 +131,23 @@ En producción, se recomienda desplegar este worker separado de Vercel y restrin
 
 ## Groq
 
-`lib/ai/groq.ts` utiliza Structured Outputs `json_schema` en modo estricto. El prompt prohíbe cálculos contables e invención. La aplicación debe persistir métricas en `ai_runs` al integrar el job orchestration completo.
+`lib/ai/groq.ts` utiliza Vercel AI SDK, el proveedor Groq y salida estructurada validada con Zod. El prompt prohíbe cálculos contables e invención. Cada ejecución persiste modelo, tamaño de entrada, tokens, latencia y estado en `ai_runs`.
 
-La estrategia es: parser determinístico → regex/tablas → MarkItDown → Groq únicamente para ambigüedad.
+La estrategia es: extracción serverless con `unpdf` → parser determinístico/regex → Groq para estructuración ambigua. El worker MarkItDown/Tesseract queda como vía OCR para PDF escaneados.
+
+## Procesamiento automático
+
+Al existir un PDF soporte y un CSV de unidades pendientes del mismo administrador, la aplicación:
+
+1. Reclama el par y cambia su estado a `extracting`.
+2. Descarga y descifra ambos archivos únicamente en servidor.
+3. Extrae el texto del PDF por página con `unpdf` y estructura los albaranes con Groq.
+4. Normaliza el CSV y persiste páginas, unidades y métricas de IA.
+5. Compara de forma determinística `albarán + component_code + unit_number`.
+6. Guarda `CSV_ONLY` para cada unidad facturada que no aparece en el albarán.
+7. Publica los resultados en Dashboard, Conciliaciones, Facturación y Reportes.
+
+Los pares que ya estaban en `pending` se inician al abrir Documentos. Un proceso fallido puede reintentarse sin volver a subir archivos.
 
 ## Conciliación
 
@@ -214,9 +228,9 @@ GitHub Actions ejecuta lint, typecheck, Vitest y build. No guardar `.env.local` 
 ## Limitaciones conocidas de esta entrega
 
 - El PDF `FRA 3282-HOSPITAL DE ALTA COMPLEJIDAD.pdf` y el CSV `UnitsSentToOtherCentres.csv` **no estaban adjuntos en el mensaje que originó este repositorio**, por lo que no se afirma que el parser haya sido validado contra esos binarios reales. Se incluye un fixture anonimizado conforme a los conteos indicados para 143909.
-- Las pantallas administrativas están creadas como módulos base; para una operación final se deben conectar las tablas a formularios CRUD, paginación, filtros, exportadores XLSX/PDF y el flujo de revisión manual.
-- El job orchestration completo de procesamiento asíncrono y el endpoint autenticado de streaming de páginas originales requieren el almacenamiento Supabase real para una prueba end-to-end.
-- Tesseract español se instala en el Docker del worker; documentos manuscritos pueden requerir un motor de visión adicional. La arquitectura deja esa decisión detrás de `DocumentProcessor`.
+- Los PDF sin capa de texto requieren desplegar el worker OCR de `workers/python`; la ruta serverless automática procesa directamente PDF con texto seleccionable.
+- Los formularios avanzados de mantenimiento de precios, decisiones manuales y exportación XLSX/PDF siguen pendientes.
+- Tesseract español se instala en el Docker del worker; documentos manuscritos pueden requerir un motor de visión adicional.
 
 ## Licencia
 

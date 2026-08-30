@@ -1,9 +1,15 @@
 import crypto from 'node:crypto';
+import { after } from 'next/server';
 import { createSupabaseServerClient } from '@/lib/supabase/server';
 import { validateUpload } from '@/lib/security/upload';
 import { encryptFile } from '@/lib/crypto/files';
+import {
+  claimPendingPair,
+  processClaimedPair,
+} from '@/lib/reconciliation/orchestrator';
 
 export const runtime = 'nodejs';
+export const maxDuration = 300;
 
 function uploadError(cause: unknown) {
   const message = cause instanceof Error ? cause.message : 'UPLOAD_FAILURE';
@@ -128,6 +134,15 @@ export async function POST(request: Request) {
         { status: databaseError.code === '23505' ? 409 : 500 },
       );
     }
+
+    after(async () => {
+      try {
+        const pair = await claimPendingPair(user.id);
+        if (pair) await processClaimedPair(pair);
+      } catch (cause) {
+        console.error('[documents/upload/automatic-processing]', cause);
+      }
+    });
 
     return Response.json(data, { status: 201 });
   } catch (cause) {

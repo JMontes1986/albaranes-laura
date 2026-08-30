@@ -1,4 +1,5 @@
 import { DocumentUploadForm } from '@/components/document-upload-form';
+import { DocumentProcessingMonitor } from '@/components/document-processing-monitor';
 import { createSupabaseServerClient } from '@/lib/supabase/server';
 
 const typeLabels: Record<string, string> = {
@@ -30,11 +31,35 @@ export default async function DocumentsPage() {
     )
     .order('created_at', { ascending: false })
     .limit(100);
+  const latestDocuments = [
+    documents?.find((document) => document.document_type === 'pdf_support'),
+    documents?.find((document) => document.document_type === 'csv_units'),
+  ].filter(Boolean);
+  const pendingTypes = new Set(
+    latestDocuments
+      .filter((document) => document?.status === 'pending')
+      .map((document) => document?.document_type),
+  );
+  const hasPendingPair =
+    pendingTypes.has('pdf_support') && pendingTypes.has('csv_units');
+  const isProcessing = Boolean(
+    latestDocuments.some((document) =>
+      ['extracting', 'analyzing', 'reconciling'].includes(document?.status ?? ''),
+    ),
+  );
+  const hasFailed = Boolean(
+    latestDocuments.some((document) => document?.status === 'failed'),
+  );
 
   return (
     <>
       <h1>Documentos</h1>
       <DocumentUploadForm />
+      <DocumentProcessingMonitor
+        hasPendingPair={hasPendingPair}
+        isProcessing={isProcessing}
+        hasFailed={hasFailed}
+      />
       <section className="card documents-list" aria-labelledby="documents-title">
         <h2 id="documents-title">Documentos cargados</h2>
         {error ? (
