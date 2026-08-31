@@ -1,6 +1,6 @@
 # Sistema de Conciliación de Albaranes y Facturación
 
-Aplicación Next.js + Supabase para conciliar soportes PDF con unidades despachadas en CSV. La extracción documental usa texto nativo cuando existe y OCR visual optimizado para PDF escaneados, mientras que la conciliación, devoluciones y facturación se resuelven de forma determinística.
+Aplicación Next.js + Supabase para conciliar soportes PDF con unidades despachadas en CSV. La extracción documental usa texto nativo cuando existe y OCR local optimizado para PDF escaneados, mientras que la conciliación, devoluciones y facturación se resuelven de forma determinística.
 
 ## Arquitectura
 
@@ -11,7 +11,7 @@ flowchart TD
   E --> S[Supabase Storage privado]
   S --> D[Descifrado server-side]
   D --> P[unpdf + clasificador de páginas]
-  P --> O[OCR visual hasta 80 páginas]
+  P --> O[Tesseract.js local hasta 80 páginas]
   O --> C[JPEG optimizado + Markdown estructurado]
   C --> T[Normalización / TOON]
   T --> G[Groq Structured Outputs]
@@ -26,9 +26,9 @@ flowchart TD
 - **Next.js App Router / Node runtime** para UI, Auth y endpoints de dominio.
 - **Supabase Auth + RLS**: `viewer` puede leer resultados; `admin` realiza escrituras sensibles.
 - **Storage privado** y **cifrado a nivel de aplicación** mediante clave de datos aleatoria por archivo y una clave maestra de 32 bytes solo servidor.
-- **OCR visual serverless**. Los PDF escaneados de hasta 80 páginas se renderizan por lotes, se reducen a 1600 px, se convierten a JPEG y se procesan con concurrencia controlada para no agotar memoria.
+- **OCR local serverless**. Los PDF escaneados de hasta 80 páginas se renderizan por lotes, se reducen a 1600 px, se convierten a JPEG y se leen con Tesseract.js sin consumir tokens visuales.
 - **DocumentProcessor desacoplado opcional**. `workers/python` conserva una implementación FastAPI/Docker con MarkItDown, PyMuPDF y Tesseract para una futura ejecución dedicada.
-- **Groq no calcula facturas**. GPT-OSS estructura texto ambiguo y el modelo visual realiza OCR; ambos usan Structured Outputs validados antes de entrar en el motor determinístico.
+- **Groq no calcula facturas ni procesa imágenes**. GPT-OSS solo estructura texto ambiguo mediante Structured Outputs validados antes de entrar en el motor determinístico.
 - **CSV real**: delimitador `;`, BOM UTF-8, UTF-8 y fallback Windows-1252/Latin-1. Cada fila se trata como una unidad.
 - **TOON** se aplica en `lib/ai/toon.ts` antes de Groq y registra reducción de caracteres y estimación de tokens.
 
@@ -65,7 +65,6 @@ Copiar `.env.example` a `.env.local`.
 - `GROQ_API_KEY`: secreto servidor.
 - `GROQ_PRIMARY_MODEL=openai/gpt-oss-120b`.
 - `GROQ_FAST_MODEL=openai/gpt-oss-20b`.
-- `GROQ_VISION_MODEL=qwen/qwen3.6-27b`.
 - `FILE_ENCRYPTION_KEY`: **32 bytes aleatorios codificados Base64**.
 - `MAX_UPLOAD_MB`: límite de archivos (máximo efectivo de 4 MB por el límite de peticiones de Vercel Functions).
 - `DOCUMENT_PROCESSOR_URL`: URL interna/privada del worker Python opcional.
@@ -115,8 +114,8 @@ La ruta automática en Vercel intenta primero extraer texto con `unpdf`. Cuando 
 1. Admite hasta 80 páginas.
 2. Renderiza lotes de tres páginas, con dos lotes concurrentes como máximo.
 3. Reduce cada página a 1600 px y la convierte a JPEG de calidad 68 para disminuir memoria y transferencia.
-4. Groq Vision devuelve exclusivamente unidades que también existan en el CSV.
-5. La aplicación vuelve a validar cada unidad y genera Markdown estructurado por página.
+4. Dos trabajadores Tesseract.js reutilizables reconocen el texto localmente.
+5. La aplicación valida cada unidad contra el CSV y genera Markdown estructurado por página.
 
 El PDF original no se modifica: permanece cifrado en Supabase. La optimización es una representación temporal en memoria utilizada únicamente durante el análisis.
 
@@ -146,7 +145,7 @@ En producción, se recomienda desplegar este worker separado de Vercel y restrin
 
 `lib/ai/groq.ts` utiliza Vercel AI SDK, el proveedor Groq y salida estructurada validada con Zod. El prompt prohíbe cálculos contables e invención. Cada ejecución persiste modelo, tamaño de entrada, tokens, latencia y estado en `ai_runs`.
 
-La estrategia es: extracción serverless con `unpdf` → parser determinístico/regex → OCR visual comprimido cuando no hay texto → Groq para estructuración ambigua → validación estricta contra el CSV. El worker MarkItDown/Tesseract queda como alternativa opcional para despliegues dedicados.
+La estrategia es: extracción serverless con `unpdf` → parser determinístico/regex → OCR local comprimido para las páginas sin texto → Groq únicamente para estructuración textual ambigua → validación estricta contra el CSV. El worker MarkItDown/Tesseract queda como alternativa opcional para despliegues dedicados.
 
 ## Procesamiento automático
 
@@ -241,7 +240,7 @@ GitHub Actions ejecuta lint, typecheck, Vitest y build. No guardar `.env.local` 
 ## Limitaciones conocidas de esta entrega
 
 - El PDF `FRA 3282-HOSPITAL DE ALTA COMPLEJIDAD.pdf` y el CSV `UnitsSentToOtherCentres.csv` **no estaban adjuntos en el mensaje que originó este repositorio**, por lo que no se afirma que el parser haya sido validado contra esos binarios reales. Se incluye un fixture anonimizado conforme a los conteos indicados para 143909.
-- El OCR automático admite hasta 80 páginas y depende de los límites de uso de la cuenta Groq. Documentos mayores requieren un worker duradero o cola.
+- El OCR automático admite hasta 80 páginas y no consume los límites visuales de Groq. Documentos mayores requieren un worker duradero o cola.
 - Los formularios avanzados de mantenimiento de precios, decisiones manuales y exportación XLSX/PDF siguen pendientes.
 - Tesseract español se instala en el Docker del worker; documentos manuscritos pueden requerir un motor de visión adicional.
 

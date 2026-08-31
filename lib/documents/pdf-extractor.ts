@@ -1,8 +1,6 @@
 import { extractText, getDocumentProxy, renderPageAsImage } from 'unpdf';
-import {
-  extractAmbiguousDeliveryData,
-  extractUnitsFromScannedPages,
-} from '@/lib/ai/groq';
+import { extractAmbiguousDeliveryData } from '@/lib/ai/groq';
+import { createLocalOcrPool, type LocalOcrResult } from './local-ocr';
 import { classifyPage, parseDeliveryPage } from './delivery-parser';
 import type { CSVNormalizedRecord } from '@/lib/csv/parser';
 import type { PDFDeliveryNote, PDFItem } from '@/lib/reconciliation/types';
@@ -114,22 +112,39 @@ export function mapOcrMatchesToNotes(
 }
 
 export function buildOcrMarkdownPages(
-  matches: Array<{ unit_number: string; page_number: number; confidence: number }>,
+  results: LocalOcrResult[],
 ) {
-  const byPage = new Map<number, string[]>();
-  for (const match of matches) {
-    const lines = byPage.get(match.page_number) ?? [];
-    lines.push(
-      `- Unidad: \`${match.unit_number}\` (confianza OCR: ${Math.round(match.confidence * 100)}%)`,
-    );
-    byPage.set(match.page_number, lines);
-  }
   return new Map(
-    [...byPage].map(([pageNumber, lines]) => [
-      pageNumber,
-      `## Página ${pageNumber}\n\n${lines.join('\n')}`,
+    results.map((result) => [
+      result.pageNumber,
+      `## Página ${result.pageNumber}\n\n${result.text}`,
     ]),
   );
+}
+
+export function findExpectedUnitsInOcr(
+  results: LocalOcrResult[],
+  rows: CSVNormalizedRecord[],
+) {
+  const matches: Array<{
+    unit_number: string;
+    page_number: number;
+    confidence: number;
+  }> = [];
+  for (const result of results) {
+    const pageText = searchable(result.text);
+    for (const row of rows) {
+      const unit = searchable(row.unitNumber);
+      if (unit.length >= 6 && pageText.includes(unit)) {
+        matches.push({
+          unit_number: row.unitNumber,
+          page_number: result.pageNumber,
+          confidence: result.confidence,
+        });
+      }
+    }
+  }
+  return matches;
 }
 
 export async function compressImageForOcr(rendered: Uint8Array) {
@@ -161,27 +176,26 @@ async function renderCompressedPage(pdf: Awaited<ReturnType<typeof getDocumentPr
   };
 }
 
-async function extractScannedPdfMatches(input: Buffer, rows: CSVNormalizedRecord[]) {
-  if (!process.env.GROQ_API_KEY || rows.length === 0) return null;
+async function extractScannedPdfMatches(
+  input: Buffer,
+  rows: CSVNormalizedRecord[],
+  pageNumbers: number[],
+) {
+  if (rows.length === 0 || pageNumbers.length === 0) return null;
   const pdf = await getDocumentProxy(Uint8Array.from(input));
   if (pdf.numPages > OCR_MAX_PAGES) throw new Error('PDF_OCR_PAGE_LIMIT');
 
-  const expectedUnits = [...new Set(rows.map((row) => row.unitNumber))].slice(0, 500);
-  const matches: Array<{ unit_number: string; page_number: number; confidence: number }> = [];
-  let latencyMs = 0;
-  let outputTokens = 0;
-  let model = '';
   const batches = Array.from(
-    { length: Math.ceil(pdf.numPages / OCR_BATCH_SIZE) },
-    (_, batchIndex) => {
-      const firstPage = batchIndex * OCR_BATCH_SIZE + 1;
-      return Array.from(
-        { length: Math.min(OCR_BATCH_SIZE, pdf.numPages - firstPage + 1) },
-        (_, index) => firstPage + index,
-      );
-    },
+    { length: Math.ceil(pageNumbers.length / OCR_BATCH_SIZE) },
+    (_, batchIndex) =>
+      pageNumbers.slice(
+        batchIndex * OCR_BATCH_SIZE,
+        (batchIndex + 1) * OCR_BATCH_SIZE,
+      ),
   );
   let nextBatch = 0;
+  const ocrResults: LocalOcrResult[] = [];
+  const ocrPool = await createLocalOcrPool(OCR_CONCURRENCY);
 
   async function worker() {
     while (nextBatch < batches.length) {
@@ -190,46 +204,39 @@ async function extractScannedPdfMatches(input: Buffer, rows: CSVNormalizedRecord
       const rendered = await Promise.all(
         pageNumbers.map((pageNumber) => renderCompressedPage(pdf, pageNumber)),
       );
-      const batch = await extractUnitsFromScannedPages(rendered, expectedUnits);
+      const started = Date.now();
+      const batch = await ocrPool.recognize(rendered);
       const originalBytes = rendered.reduce((total, page) => total + page.originalBytes, 0);
       const optimizedBytes = rendered.reduce((total, page) => total + page.optimizedBytes, 0);
       console.info('[automatic-reconciliation] pdf-ocr-batch', {
         firstPage: pageNumbers[0],
         lastPage: pageNumbers.at(-1),
         totalPages: pdf.numPages,
-        matches: batch.items.length,
-        model: batch.model,
-        latencyMs: batch.latencyMs,
+        recognizedCharacters: batch.reduce((total, page) => total + page.text.length, 0),
+        engine: 'tesseract.js',
+        latencyMs: Date.now() - started,
         originalBytes,
         optimizedBytes,
         reductionPct: originalBytes
           ? Math.round((1 - optimizedBytes / originalBytes) * 10_000) / 100
           : 0,
       });
-      matches.push(...batch.items);
-      latencyMs += batch.latencyMs;
-      outputTokens += batch.outputTokens;
-      model = batch.model;
+      ocrResults.push(...batch);
     }
   }
 
-  await Promise.all(
-    Array.from({ length: Math.min(OCR_CONCURRENCY, batches.length) }, () => worker()),
-  );
+  try {
+    await Promise.all(
+      Array.from({ length: Math.min(OCR_CONCURRENCY, batches.length) }, () => worker()),
+    );
+  } finally {
+    await ocrPool.terminate();
+  }
 
-  const prompt = JSON.stringify({ expected_units: expectedUnits });
+  const matches = findExpectedUnitsInOcr(ocrResults, rows);
   return {
     notes: mapOcrMatchesToNotes(matches, rows),
-    markdownPages: buildOcrMarkdownPages(matches),
-    metrics: {
-      jsonChars: prompt.length,
-      toonChars: prompt.length,
-      reductionPct: 0,
-      estimatedTokens: Math.ceil(prompt.length / 4),
-      model,
-      latencyMs,
-      outputTokens,
-    } satisfies AiMetrics,
+    markdownPages: buildOcrMarkdownPages(ocrResults),
   };
 }
 
@@ -277,11 +284,15 @@ export async function extractDeliveryNotesFromPdf(
   const readablePages = pages.filter((page) => page.markdown.trim().length >= 20);
   const candidates = explicitCandidates.length > 0 ? explicitCandidates : readablePages;
   let aiMetrics: AiMetrics | null = null;
+  let ocrAttempted = false;
 
-  if (readablePages.length === 0) {
-    const ocr = await extractScannedPdfMatches(input, expectedRows);
+  const ocrPageNumbers = pages
+    .filter((page) => page.needsOcr)
+    .map((page) => page.pageNumber);
+  if (ocrPageNumbers.length > 0) {
+    const ocr = await extractScannedPdfMatches(input, expectedRows, ocrPageNumbers);
     if (ocr) {
-      aiMetrics = ocr.metrics;
+      ocrAttempted = true;
       for (const note of ocr.notes) notes.set(note.deliveryNoteNumber, note);
       for (const page of pages) {
         const markdown = ocr.markdownPages.get(page.pageNumber);
@@ -342,7 +353,7 @@ export async function extractDeliveryNotesFromPdf(
   const deliveryNotes = [...notes.values()].filter((note) => note.items.length > 0);
   if (deliveryNotes.length === 0) {
     throw new Error(
-      readablePages.length === 0 && aiMetrics
+      ocrAttempted
         ? 'PDF_OCR_NO_MATCHES'
         : readablePages.length === 0
           ? 'PDF_WITHOUT_EXTRACTABLE_TEXT'

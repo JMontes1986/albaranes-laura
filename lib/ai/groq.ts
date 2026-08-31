@@ -3,22 +3,6 @@ import { generateText, Output } from 'ai';
 import { z } from 'zod';
 import { encodeForLLM } from './toon';
 
-const ScannedPageSchema = z.object({
-  items: z.array(
-    z.object({
-      unit_number: z.string(),
-      page_number: z.number().int().positive(),
-      confidence: z.number().min(0).max(1),
-    }),
-  ),
-});
-
-export type ScannedPageImage = {
-  pageNumber: number;
-  data: Uint8Array;
-  mediaType: 'image/jpeg' | 'image/png';
-};
-
 const Item = z.object({
   delivery_note_number: z.string().nullable(),
   date: z.string().nullable(),
@@ -70,54 +54,5 @@ export async function extractAmbiguousDeliveryData(input: unknown, complex = tru
       latencyMs: Date.now() - started,
       outputTokens: result.usage.outputTokens,
     },
-  };
-}
-
-export async function extractUnitsFromScannedPages(
-  pages: ScannedPageImage[],
-  expectedUnitNumbers: string[],
-) {
-  if (!process.env.GROQ_API_KEY) throw new Error('GROQ_API_KEY missing');
-  if (pages.length === 0) return { items: [], model: '', latencyMs: 0, outputTokens: 0 };
-
-  const provider = createGroq({ apiKey: process.env.GROQ_API_KEY });
-  const model = process.env.GROQ_VISION_MODEL || 'qwen/qwen3.6-27b';
-  const started = Date.now();
-  const pageMap = pages.map((page, index) => `imagen ${index + 1} = página PDF ${page.pageNumber}`);
-  const result = await generateText({
-    model: provider(model),
-    output: Output.object({ schema: ScannedPageSchema }),
-    system:
-      'Eres un OCR especializado en documentos sanitarios. No inventes ni completes números. ' +
-      'Devuelve una unidad únicamente cuando el número completo sea visible en una imagen. ' +
-      'Compara ignorando espacios, guiones y separadores, pero devuelve literalmente el candidato esperado. ' +
-      'Si no ves ninguna coincidencia exacta, devuelve items vacío.',
-    messages: [
-      {
-        role: 'user',
-        content: [
-          {
-            type: 'text',
-            text:
-              `Correspondencia de imágenes: ${pageMap.join('; ')}.\n` +
-              `Candidatos permitidos: ${JSON.stringify(expectedUnitNumbers)}.\n` +
-              'Busca exclusivamente esos números de unidad y devuelve su página PDF.',
-          },
-          ...pages.map((page) => ({
-            type: 'file' as const,
-            mediaType: page.mediaType,
-            data: page.data,
-          })),
-        ],
-      },
-    ],
-    temperature: 0,
-  });
-
-  return {
-    items: result.output.items,
-    model,
-    latencyMs: Date.now() - started,
-    outputTokens: result.usage.outputTokens ?? 0,
   };
 }

@@ -2,11 +2,13 @@ import { describe, expect, it } from 'vitest';
 import {
   buildOcrMarkdownPages,
   compressImageForOcr,
+  findExpectedUnitsInOcr,
   findExactCsvMatches,
   mapOcrMatchesToNotes,
   OCR_MAX_PAGES,
 } from '@/lib/documents/pdf-extractor';
 import type { CSVNormalizedRecord } from '@/lib/csv/parser';
+import { recognizePageImages } from '@/lib/documents/local-ocr';
 
 describe('PDF exact unit matching', () => {
   it('finds expected CSV units even when the PDF has no delivery-note heading', () => {
@@ -74,13 +76,15 @@ describe('PDF exact unit matching', () => {
       },
     ];
 
-    const notes = mapOcrMatchesToNotes(
-      [
-        { unit_number: '2631010001-00', page_number: 2, confidence: 0.94 },
-        { unit_number: 'INVENTADA-99', page_number: 2, confidence: 1 },
-      ],
-      rows,
-    );
+    const ocrResults = [
+      {
+        pageNumber: 2,
+        text: 'Unidad reconocida: 2631010001-00',
+        confidence: 0.94,
+      },
+    ];
+    const matches = findExpectedUnitsInOcr(ocrResults, rows);
+    const notes = mapOcrMatchesToNotes(matches, rows);
 
     expect(notes).toHaveLength(1);
     expect(notes[0]).toMatchObject({
@@ -90,27 +94,28 @@ describe('PDF exact unit matching', () => {
       items: [{ componentCode: 'GRPL', unitNumber: '2631010001 00' }],
     });
     expect(OCR_MAX_PAGES).toBe(80);
-    expect(
-      buildOcrMarkdownPages([
-        { unit_number: '2631010001 00', page_number: 2, confidence: 0.94 },
-      ]).get(2),
-    ).toContain('## Página 2');
+    expect(buildOcrMarkdownPages(ocrResults).get(2)).toContain('2631010001-00');
   });
 
-  it('converts rendered OCR pages to JPEG before sending them to the AI', async () => {
+  it('compresses and recognizes a rendered page without Qwen vision', async () => {
     const { createCanvas } = await import('@napi-rs/canvas');
-    const canvas = createCanvas(320, 180);
+    const canvas = createCanvas(1_200, 500);
     const context = canvas.getContext('2d');
     context.fillStyle = '#ffffff';
-    context.fillRect(0, 0, 320, 180);
+    context.fillRect(0, 0, canvas.width, canvas.height);
     context.fillStyle = '#111827';
-    context.font = '24px sans-serif';
-    context.fillText('Unidad 2631010001 00', 20, 90);
+    context.font = '72px sans-serif';
+    context.fillText('Unidad 2631010001 00', 60, 260);
 
     const jpeg = await compressImageForOcr(
       new Uint8Array(await canvas.encode('png')),
     );
 
     expect([...jpeg.slice(0, 3)]).toEqual([0xff, 0xd8, 0xff]);
+    const [recognized] = await recognizePageImages(
+      [{ pageNumber: 1, data: jpeg }],
+      1,
+    );
+    expect(recognized.text.replace(/[^0-9]/g, '')).toContain('263101000100');
   });
 });

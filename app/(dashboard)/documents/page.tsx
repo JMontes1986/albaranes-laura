@@ -35,6 +35,12 @@ function processingErrorMessage(error: string | null | undefined) {
   if (error === 'PDF_OCR_PAGE_LIMIT') {
     return 'El PDF supera el límite de 80 páginas admitido para OCR automático.';
   }
+  if (
+    error?.includes('tokens per minute (TPM)') ||
+    error?.includes('Request too large for model')
+  ) {
+    return 'El análisis visual anterior superó el límite de Groq. El nuevo OCR local divide el PDF automáticamente; pulsa Reintentar análisis.';
+  }
   if (error?.includes('GROQ')) {
     return 'La extracción con IA no respondió correctamente. Revisa GROQ_API_KEY.';
   }
