@@ -5,9 +5,9 @@ export const PROCESSING_STATUSES = [
 ] as const;
 
 // Leave time for persisting results before Vercel reaches its 300-second limit.
-export const EXTRACTION_TIMEOUT_MS = 90_000;
-export const PROCESSING_STALE_MS = 150_000;
-export const OCR_PAGES_PER_RUN = 6;
+export const EXTRACTION_TIMEOUT_MS = 240_000;
+export const PROCESSING_STALE_MS = 120_000;
+export const OCR_PAGES_PER_RUN = 3;
 
 export function isProcessingStatus(status: string) {
   return PROCESSING_STATUSES.includes(

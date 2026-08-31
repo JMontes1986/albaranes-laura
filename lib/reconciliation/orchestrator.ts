@@ -300,6 +300,23 @@ export async function processClaimedPair(pair: ClaimedPair) {
         signal: extractionController.signal,
         cachedOcrResults,
         maxOcrPages: OCR_PAGES_PER_RUN,
+        onPreparationProgress: async (completedPages, totalPages) => {
+          const progress = 3 + Math.round((completedPages / totalPages) * 7);
+          const stage =
+            completedPages === totalPages
+              ? `Estructura lista: ${totalPages} páginas. Iniciando OCR`
+              : `Leyendo estructura: ${completedPages} de ${totalPages} páginas`;
+          await setDocumentStatus(
+            documentIds,
+            'analyzing',
+            progress,
+            stage,
+          );
+          console.info('[automatic-reconciliation] pdf-structure-progress', {
+            completedPages,
+            totalPages,
+          });
+        },
         onOcrBatch: async (batch) => {
           const { error: checkpointSaveError } = await admin
             .from('document_pages')

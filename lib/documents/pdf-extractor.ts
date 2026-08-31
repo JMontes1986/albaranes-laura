@@ -1,4 +1,4 @@
-import { extractText, getDocumentProxy, renderPageAsImage } from 'unpdf';
+import { getDocumentProxy, renderPageAsImage } from 'unpdf';
 import { extractAmbiguousDeliveryData } from '@/lib/ai/groq';
 import { createLocalOcrPool, type LocalOcrResult } from './local-ocr';
 import { classifyPage, parseDeliveryPage } from './delivery-parser';
@@ -15,19 +15,25 @@ export type ExtractedPdfPage = {
 
 type AiMetrics = Awaited<ReturnType<typeof extractAmbiguousDeliveryData>>['metrics'];
 
-const OCR_BATCH_SIZE = 3;
-const OCR_CONCURRENCY = 2;
+const OCR_BATCH_SIZE = 1;
+const OCR_CONCURRENCY = 1;
 export const OCR_MAX_PAGES = 80;
 const OCR_IMAGE_WIDTH = 1_600;
 const OCR_JPEG_QUALITY = 68;
 
 type ExtractionOptions = {
   signal?: AbortSignal;
+  onPreparationProgress?: (
+    completedPages: number,
+    totalPages: number,
+  ) => Promise<void> | void;
   onOcrProgress?: (completedPages: number, totalPages: number) => Promise<void> | void;
   onOcrBatch?: (results: LocalOcrResult[]) => Promise<void> | void;
   cachedOcrResults?: LocalOcrResult[];
   maxOcrPages?: number;
 };
+
+type PdfProxy = Awaited<ReturnType<typeof getDocumentProxy>>;
 
 function processingTimeoutError() {
   return new Error('PROCESSING_TIMEOUT');
@@ -50,6 +56,34 @@ async function abortable<T>(promise: Promise<T>, signal?: AbortSignal) {
       },
     );
   });
+}
+
+async function extractPdfTextSequentially(
+  pdf: PdfProxy,
+  options: ExtractionOptions,
+) {
+  const text: string[] = [];
+  for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+    if (options.signal?.aborted) throw processingTimeoutError();
+    const page = await abortable(pdf.getPage(pageNumber), options.signal);
+    try {
+      const content = await abortable(page.getTextContent(), options.signal);
+      text.push(
+        content.items
+          .filter((item): item is Extract<(typeof content.items)[number], { str: string }> =>
+            'str' in item,
+          )
+          .map((item) => item.str + (item.hasEOL ? '\n' : ''))
+          .join(''),
+      );
+    } finally {
+      page.cleanup();
+    }
+    if (pageNumber === 1 || pageNumber % 5 === 0 || pageNumber === pdf.numPages) {
+      await options.onPreparationProgress?.(pageNumber, pdf.numPages);
+    }
+  }
+  return text;
 }
 
 function normalize(value: string) {
@@ -219,13 +253,12 @@ async function renderCompressedPage(pdf: Awaited<ReturnType<typeof getDocumentPr
 }
 
 async function extractScannedPdfMatches(
-  input: Buffer,
+  pdf: PdfProxy,
   rows: CSVNormalizedRecord[],
   pageNumbers: number[],
   options: ExtractionOptions,
 ) {
   if (rows.length === 0 || pageNumbers.length === 0) return null;
-  const pdf = await getDocumentProxy(Uint8Array.from(input));
   if (pdf.numPages > OCR_MAX_PAGES) throw new Error('PDF_OCR_PAGE_LIMIT');
 
   const cachedResults = (options.cachedOcrResults ?? []).filter((result) =>
@@ -318,8 +351,25 @@ export async function extractDeliveryNotesFromPdf(
   expectedRows: CSVNormalizedRecord[] = [],
   options: ExtractionOptions = {},
 ) {
-  const extracted = await extractText(Uint8Array.from(input));
-  const pages: ExtractedPdfPage[] = extracted.text.map((text, index) => ({
+  const pdf = await abortable(
+    getDocumentProxy(Uint8Array.from(input)),
+    options.signal,
+  );
+  try {
+    return await extractDeliveryNotesFromPdfDocument(pdf, expectedRows, options);
+  } finally {
+    await pdf.loadingTask.destroy();
+  }
+}
+
+async function extractDeliveryNotesFromPdfDocument(
+  pdf: PdfProxy,
+  expectedRows: CSVNormalizedRecord[],
+  options: ExtractionOptions,
+) {
+  if (pdf.numPages > OCR_MAX_PAGES) throw new Error('PDF_OCR_PAGE_LIMIT');
+  const extractedText = await extractPdfTextSequentially(pdf, options);
+  const pages: ExtractedPdfPage[] = extractedText.map((text, index) => ({
     pageNumber: index + 1,
     classification: classifyPage(text),
     markdown: text,
@@ -365,7 +415,7 @@ export async function extractDeliveryNotesFromPdf(
     .map((page) => page.pageNumber);
   if (ocrPageNumbers.length > 0) {
     const ocr = await extractScannedPdfMatches(
-      input,
+      pdf,
       expectedRows,
       ocrPageNumbers,
       options,
