@@ -4,6 +4,7 @@ import { parseUnitsCsv, type CSVNormalizedRecord } from '@/lib/csv/parser';
 import { extractDeliveryNotesFromPdf } from '@/lib/documents/pdf-extractor';
 import {
   EXTRACTION_TIMEOUT_MS,
+  OCR_PAGES_PER_RUN,
   PROCESSING_STALE_MS,
   isProcessingStatus,
 } from '@/lib/documents/processing';
@@ -31,12 +32,13 @@ type DocumentRow = {
   uploaded_by: string;
   created_at: string;
   processing_started_at: string | null;
+  processing_progress: number;
 };
 
 export type ClaimedPair = { pdf: DocumentRow; csv: DocumentRow; userId: string };
 
 const documentFields =
-  'id,document_type,storage_path,encrypted_file_key,iv,auth_tag,key_iv,key_auth_tag,sha256,status,uploaded_by,created_at,processing_started_at';
+  'id,document_type,storage_path,encrypted_file_key,iv,auth_tag,key_iv,key_auth_tag,sha256,status,uploaded_by,created_at,processing_started_at,processing_progress';
 
 function key(delivery: string, component: string, unit: string) {
   return `${delivery.trim().toUpperCase()}::${component.trim().toUpperCase()}::${unit
@@ -91,15 +93,26 @@ async function claimPair(
   if (!pdf || !csv) return null;
 
   const ids = [pdf.id, csv.id];
-  const startedAt = new Date().toISOString();
+  const now = new Date().toISOString();
+  const startedAt =
+    sourceStatus === 'pending'
+      ? pdf.processing_started_at ?? csv.processing_started_at ?? now
+      : now;
+  const currentProgress =
+    sourceStatus === 'pending'
+      ? Math.max(pdf.processing_progress, csv.processing_progress, 2)
+      : 2;
   const { data: claimed, error: claimError } = await admin
     .from('documents')
     .update({
       status: 'extracting',
       processing_started_at: startedAt,
-      processing_updated_at: startedAt,
-      processing_progress: 2,
-      processing_stage: 'Descargando y descifrando archivos',
+      processing_updated_at: now,
+      processing_progress: currentProgress,
+      processing_stage:
+        currentProgress > 2
+          ? 'Reanudando desde el último lote guardado'
+          : 'Descargando y descifrando archivos',
     })
     .in('id', ids)
     .eq('status', sourceStatus)
@@ -123,7 +136,9 @@ export async function recoverStaleProcessing(userId: string) {
   const admin = createSupabaseAdminClient();
   const { data, error } = await admin
     .from('documents')
-    .select('id,document_type,status,created_at,processing_started_at')
+    .select(
+      'id,document_type,status,created_at,processing_started_at,processing_updated_at',
+    )
     .eq('uploaded_by', userId)
     .is('deleted_at', null)
     .in('status', ['extracting', 'analyzing', 'reconciling'])
@@ -134,8 +149,12 @@ export async function recoverStaleProcessing(userId: string) {
   const now = Date.now();
   const stale = (data ?? []).filter((document) => {
     if (!isProcessingStatus(document.status)) return false;
-    const started = Date.parse(document.processing_started_at ?? document.created_at);
-    return Number.isFinite(started) && now - started >= PROCESSING_STALE_MS;
+    const lastActivity = Date.parse(
+      document.processing_updated_at ??
+        document.processing_started_at ??
+        document.created_at,
+    );
+    return Number.isFinite(lastActivity) && now - lastActivity >= PROCESSING_STALE_MS;
   });
   if (stale.length === 0) return 0;
 
@@ -245,7 +264,31 @@ export async function processClaimedPair(pair: ClaimedPair) {
     if (csvRows.length === 0) throw new Error('CSV_EMPTY');
     console.info('[automatic-reconciliation] csv-parsed', { records: csvRows.length });
 
-    await setDocumentStatus(documentIds, 'analyzing', 10, 'Preparando páginas del PDF');
+    const { data: checkpointPages, error: checkpointError } = await admin
+      .from('document_pages')
+      .select('page_number,markdown,confidence')
+      .eq('document_id', pair.pdf.id)
+      .eq('page_type', 'ocr_checkpoint')
+      .order('page_number');
+    if (checkpointError) {
+      throw new Error(`OCR_CHECKPOINT_LOOKUP_${checkpointError.message}`);
+    }
+    const cachedOcrResults = (checkpointPages ?? []).map((page) => ({
+      pageNumber: page.page_number,
+      text: page.markdown ?? '',
+      confidence: Number(page.confidence ?? 0),
+    }));
+    const resumedProgress = cachedOcrResults.length
+      ? Math.min(74, 10 + cachedOcrResults.length)
+      : 10;
+    await setDocumentStatus(
+      documentIds,
+      'analyzing',
+      resumedProgress,
+      cachedOcrResults.length
+        ? `Reanudando OCR desde ${cachedOcrResults.length} páginas guardadas`
+        : 'Preparando páginas del PDF',
+    );
     const extractionController = new AbortController();
     const extractionTimer = setTimeout(
       () => extractionController.abort(),
@@ -255,6 +298,27 @@ export async function processClaimedPair(pair: ClaimedPair) {
     try {
       extraction = await extractDeliveryNotesFromPdf(pdfBuffer, csvRows, {
         signal: extractionController.signal,
+        cachedOcrResults,
+        maxOcrPages: OCR_PAGES_PER_RUN,
+        onOcrBatch: async (batch) => {
+          const { error: checkpointSaveError } = await admin
+            .from('document_pages')
+            .upsert(
+              batch.map((page) => ({
+                document_id: pair.pdf.id,
+                page_number: page.pageNumber,
+                page_type: 'ocr_checkpoint',
+                markdown: page.text,
+                text_sufficient: true,
+                needs_ocr: false,
+                confidence: page.confidence,
+              })),
+              { onConflict: 'document_id,page_number' },
+            );
+          if (checkpointSaveError) {
+            throw new Error(`OCR_CHECKPOINT_SAVE_${checkpointSaveError.message}`);
+          }
+        },
         onOcrProgress: async (completedPages, totalPages) => {
           const progress = 10 + Math.round((completedPages / totalPages) * 65);
           await setDocumentStatus(
@@ -267,6 +331,29 @@ export async function processClaimedPair(pair: ClaimedPair) {
       });
     } finally {
       clearTimeout(extractionTimer);
+    }
+    if (extraction.incomplete) {
+      const progress =
+        10 +
+        Math.round(
+          (extraction.ocrCompletedPages / extraction.ocrTotalPages) * 65,
+        );
+      await setDocumentStatus(
+        documentIds,
+        'pending',
+        progress,
+        `OCR guardado: ${extraction.ocrCompletedPages} de ${extraction.ocrTotalPages} páginas`,
+      );
+      console.info('[automatic-reconciliation] continuation-scheduled', {
+        completedPages: extraction.ocrCompletedPages,
+        totalPages: extraction.ocrTotalPages,
+      });
+      return {
+        reconciliationId: null,
+        continuation: true,
+        completedPages: extraction.ocrCompletedPages,
+        totalPages: extraction.ocrTotalPages,
+      };
     }
     console.info('[automatic-reconciliation] pdf-extracted', {
       pages: extraction.pages.length,

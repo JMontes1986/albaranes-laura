@@ -14,6 +14,7 @@ type Props = {
   hasFailed: boolean;
   failureReason: string;
   processingStartedAt: string | null;
+  processingUpdatedAt: string | null;
   processingProgress: number;
   processingStage: string | null;
 };
@@ -24,6 +25,7 @@ export function DocumentProcessingMonitor({
   hasFailed,
   failureReason,
   processingStartedAt,
+  processingUpdatedAt,
   processingProgress,
   processingStage,
 }: Props) {
@@ -34,6 +36,10 @@ export function DocumentProcessingMonitor({
   const [retrying, setRetrying] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const elapsed = elapsedProcessingMs(processingStartedAt, now);
+  const inactivity = elapsedProcessingMs(
+    processingUpdatedAt ?? processingStartedAt,
+    now,
+  );
 
   async function retry() {
     setRetrying(true);
@@ -76,13 +82,12 @@ export function DocumentProcessingMonitor({
 
   useEffect(() => {
     if (!isProcessing) return;
-    setNow(Date.now());
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
     return () => window.clearInterval(timer);
   }, [isProcessing, processingStartedAt]);
 
   useEffect(() => {
-    if (!isProcessing || elapsed < PROCESSING_STALE_MS) {
+    if (!isProcessing || inactivity < PROCESSING_STALE_MS) {
       if (!isProcessing) recoveryAttempted.current = false;
       return;
     }
@@ -106,7 +111,7 @@ export function DocumentProcessingMonitor({
     return () => {
       active = false;
     };
-  }, [elapsed, isProcessing, router]);
+  }, [inactivity, isProcessing, router]);
 
   useEffect(() => {
     if (!hasPendingPair && !isProcessing) return;
@@ -129,7 +134,9 @@ export function DocumentProcessingMonitor({
           </p>
           <div className="processing-time">
             <strong>Tiempo: {formatElapsedTime(elapsed)}</strong>
-            <span>Límite: {formatElapsedTime(PROCESSING_STALE_MS)}</span>
+            <span>
+              Sin actividad: {formatElapsedTime(inactivity)}
+            </span>
           </div>
           <progress
             aria-label="Progreso del análisis"
@@ -137,7 +144,7 @@ export function DocumentProcessingMonitor({
             value={Math.max(1, Math.min(99, processingProgress))}
           />
           <small>
-            {elapsed >= PROCESSING_STALE_MS
+            {inactivity >= PROCESSING_STALE_MS
               ? 'Comprobando y recuperando un análisis bloqueado…'
               : `${Math.max(1, processingProgress)} % completado`}
           </small>

@@ -24,6 +24,9 @@ const OCR_JPEG_QUALITY = 68;
 type ExtractionOptions = {
   signal?: AbortSignal;
   onOcrProgress?: (completedPages: number, totalPages: number) => Promise<void> | void;
+  onOcrBatch?: (results: LocalOcrResult[]) => Promise<void> | void;
+  cachedOcrResults?: LocalOcrResult[];
+  maxOcrPages?: number;
 };
 
 function processingTimeoutError() {
@@ -73,6 +76,17 @@ function mergeItem(note: PDFDeliveryNote, item: PDFItem) {
 
 function searchable(value: string) {
   return value.normalize('NFKD').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+}
+
+export function selectOcrPagesForRun(
+  pageNumbers: number[],
+  cachedPageNumbers: Iterable<number>,
+  maxPages: number,
+) {
+  const cached = new Set(cachedPageNumbers);
+  return pageNumbers
+    .filter((pageNumber) => !cached.has(pageNumber))
+    .slice(0, Math.max(0, maxPages));
 }
 
 export function findExactCsvMatches(
@@ -214,19 +228,34 @@ async function extractScannedPdfMatches(
   const pdf = await getDocumentProxy(Uint8Array.from(input));
   if (pdf.numPages > OCR_MAX_PAGES) throw new Error('PDF_OCR_PAGE_LIMIT');
 
+  const cachedResults = (options.cachedOcrResults ?? []).filter((result) =>
+    pageNumbers.includes(result.pageNumber),
+  );
+  const cachedPageNumbers = cachedResults.map((result) => result.pageNumber);
+  const cachedPageSet = new Set(cachedPageNumbers);
+  const remainingPages = pageNumbers.filter(
+    (pageNumber) => !cachedPageSet.has(pageNumber),
+  );
+  const pagesThisRun = selectOcrPagesForRun(
+    pageNumbers,
+    cachedPageNumbers,
+    options.maxOcrPages ?? remainingPages.length,
+  );
+
   const batches = Array.from(
-    { length: Math.ceil(pageNumbers.length / OCR_BATCH_SIZE) },
+    { length: Math.ceil(pagesThisRun.length / OCR_BATCH_SIZE) },
     (_, batchIndex) =>
-      pageNumbers.slice(
+      pagesThisRun.slice(
         batchIndex * OCR_BATCH_SIZE,
         (batchIndex + 1) * OCR_BATCH_SIZE,
       ),
   );
   const totalOcrPages = pageNumbers.length;
   let nextBatch = 0;
-  let completedPages = 0;
-  const ocrResults: LocalOcrResult[] = [];
-  const ocrPool = await createLocalOcrPool(OCR_CONCURRENCY);
+  let completedPages = cachedResults.length;
+  const ocrResults: LocalOcrResult[] = [...cachedResults];
+  const ocrPool =
+    batches.length > 0 ? await createLocalOcrPool(OCR_CONCURRENCY) : null;
 
   async function worker() {
     while (nextBatch < batches.length) {
@@ -238,6 +267,7 @@ async function extractScannedPdfMatches(
       );
       if (options.signal?.aborted) throw processingTimeoutError();
       const started = Date.now();
+      if (!ocrPool) return;
       const batch = await abortable(ocrPool.recognize(rendered), options.signal);
       const originalBytes = rendered.reduce((total, page) => total + page.originalBytes, 0);
       const optimizedBytes = rendered.reduce((total, page) => total + page.optimizedBytes, 0);
@@ -256,22 +286,30 @@ async function extractScannedPdfMatches(
       });
       ocrResults.push(...batch);
       completedPages += batch.length;
+      await options.onOcrBatch?.(batch);
       await options.onOcrProgress?.(completedPages, totalOcrPages);
     }
   }
 
   try {
-    await Promise.all(
-      Array.from({ length: Math.min(OCR_CONCURRENCY, batches.length) }, () => worker()),
-    );
+    if (ocrPool) {
+      await Promise.all(
+        Array.from({ length: Math.min(OCR_CONCURRENCY, batches.length) }, () =>
+          worker(),
+        ),
+      );
+    }
   } finally {
-    await ocrPool.terminate();
+    await ocrPool?.terminate();
   }
 
   const matches = findExpectedUnitsInOcr(ocrResults, rows);
   return {
     notes: mapOcrMatchesToNotes(matches, rows),
     markdownPages: buildOcrMarkdownPages(ocrResults),
+    complete: remainingPages.length <= pagesThisRun.length,
+    completedPages: ocrResults.length,
+    totalPages: totalOcrPages,
   };
 }
 
@@ -342,6 +380,16 @@ export async function extractDeliveryNotesFromPdf(
         page.textSufficient = true;
         page.needsOcr = false;
       }
+      if (!ocr.complete) {
+        return {
+          pages,
+          deliveryNotes: [...notes.values()].filter((note) => note.items.length > 0),
+          aiMetrics: null,
+          incomplete: true,
+          ocrCompletedPages: ocr.completedPages,
+          ocrTotalPages: ocr.totalPages,
+        };
+      }
     }
   }
 
@@ -404,5 +452,12 @@ export async function extractDeliveryNotesFromPdf(
     );
   }
 
-  return { pages, deliveryNotes, aiMetrics };
+  return {
+    pages,
+    deliveryNotes,
+    aiMetrics,
+    incomplete: false,
+    ocrCompletedPages: ocrPageNumbers.length,
+    ocrTotalPages: ocrPageNumbers.length,
+  };
 }

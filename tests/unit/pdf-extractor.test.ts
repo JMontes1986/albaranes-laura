@@ -6,11 +6,18 @@ import {
   findExactCsvMatches,
   mapOcrMatchesToNotes,
   OCR_MAX_PAGES,
+  selectOcrPagesForRun,
 } from '@/lib/documents/pdf-extractor';
 import type { CSVNormalizedRecord } from '@/lib/csv/parser';
 import { recognizePageImages } from '@/lib/documents/local-ocr';
 
 describe('PDF exact unit matching', () => {
+  it('continues with only the next uncached OCR pages', () => {
+    expect(selectOcrPagesForRun([1, 2, 3, 4, 5, 6], [1, 2], 3)).toEqual([
+      3, 4, 5,
+    ]);
+  });
+
   it('finds expected CSV units even when the PDF has no delivery-note heading', () => {
     const rows: CSVNormalizedRecord[] = [
       {

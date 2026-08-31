@@ -37,7 +37,7 @@ function processingErrorMessage(error: string | null | undefined) {
     return 'El PDF supera el límite de 80 páginas admitido para OCR automático.';
   }
   if (error === 'PROCESSING_TIMEOUT') {
-    return 'El análisis superó 4 minutos y 30 segundos y fue detenido para evitar que quede bloqueado. Puedes reintentarlo.';
+    return 'Un lote OCR dejó de responder. Las páginas ya procesadas quedaron guardadas; al reintentar continuará desde la siguiente.';
   }
   if (
     error?.includes('tokens per minute (TPM)') ||
@@ -62,7 +62,7 @@ export default async function DocumentsPage() {
   const { data: documents, error } = await supabase
     .from('documents')
     .select(
-      'id,original_filename,document_type,size_bytes,status,created_at,processing_started_at,processing_progress,processing_stage',
+      'id,original_filename,document_type,size_bytes,status,created_at,processing_started_at,processing_updated_at,processing_progress,processing_stage',
     )
     .is('deleted_at', null)
     .order('created_at', { ascending: false })
@@ -117,6 +117,7 @@ export default async function DocumentsPage() {
           processingDocument?.created_at ??
           null
         }
+        processingUpdatedAt={processingDocument?.processing_updated_at ?? null}
         processingProgress={processingDocument?.processing_progress ?? 0}
         processingStage={processingDocument?.processing_stage ?? null}
       />
