@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { findExactCsvMatches, mapOcrMatchesToNotes } from '@/lib/documents/pdf-extractor';
+import {
+  buildOcrMarkdownPages,
+  compressImageForOcr,
+  findExactCsvMatches,
+  mapOcrMatchesToNotes,
+  OCR_MAX_PAGES,
+} from '@/lib/documents/pdf-extractor';
 import type { CSVNormalizedRecord } from '@/lib/csv/parser';
 
 describe('PDF exact unit matching', () => {
@@ -83,5 +89,28 @@ describe('PDF exact unit matching', () => {
       confidence: 0.94,
       items: [{ componentCode: 'GRPL', unitNumber: '2631010001 00' }],
     });
+    expect(OCR_MAX_PAGES).toBe(80);
+    expect(
+      buildOcrMarkdownPages([
+        { unit_number: '2631010001 00', page_number: 2, confidence: 0.94 },
+      ]).get(2),
+    ).toContain('## Página 2');
+  });
+
+  it('converts rendered OCR pages to JPEG before sending them to the AI', async () => {
+    const { createCanvas } = await import('@napi-rs/canvas');
+    const canvas = createCanvas(320, 180);
+    const context = canvas.getContext('2d');
+    context.fillStyle = '#ffffff';
+    context.fillRect(0, 0, 320, 180);
+    context.fillStyle = '#111827';
+    context.font = '24px sans-serif';
+    context.fillText('Unidad 2631010001 00', 20, 90);
+
+    const jpeg = await compressImageForOcr(
+      new Uint8Array(await canvas.encode('png')),
+    );
+
+    expect([...jpeg.slice(0, 3)]).toEqual([0xff, 0xd8, 0xff]);
   });
 });

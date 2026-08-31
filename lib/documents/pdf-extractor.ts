@@ -17,8 +17,11 @@ export type ExtractedPdfPage = {
 
 type AiMetrics = Awaited<ReturnType<typeof extractAmbiguousDeliveryData>>['metrics'];
 
-const OCR_BATCH_SIZE = 5;
-const OCR_MAX_PAGES = 50;
+const OCR_BATCH_SIZE = 3;
+const OCR_CONCURRENCY = 2;
+export const OCR_MAX_PAGES = 80;
+const OCR_IMAGE_WIDTH = 1_600;
+const OCR_JPEG_QUALITY = 68;
 
 function normalize(value: string) {
   return value.trim().replace(/\s+/g, ' ').toUpperCase();
@@ -110,6 +113,54 @@ export function mapOcrMatchesToNotes(
   return [...notes.values()];
 }
 
+export function buildOcrMarkdownPages(
+  matches: Array<{ unit_number: string; page_number: number; confidence: number }>,
+) {
+  const byPage = new Map<number, string[]>();
+  for (const match of matches) {
+    const lines = byPage.get(match.page_number) ?? [];
+    lines.push(
+      `- Unidad: \`${match.unit_number}\` (confianza OCR: ${Math.round(match.confidence * 100)}%)`,
+    );
+    byPage.set(match.page_number, lines);
+  }
+  return new Map(
+    [...byPage].map(([pageNumber, lines]) => [
+      pageNumber,
+      `## Página ${pageNumber}\n\n${lines.join('\n')}`,
+    ]),
+  );
+}
+
+export async function compressImageForOcr(rendered: Uint8Array) {
+  const canvasModule = await import('@napi-rs/canvas');
+  const source = await canvasModule.loadImage(rendered);
+  const canvas = canvasModule.createCanvas(source.width, source.height);
+  const context = canvas.getContext('2d');
+  context.fillStyle = '#ffffff';
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(source, 0, 0);
+  return new Uint8Array(await canvas.encode('jpeg', OCR_JPEG_QUALITY));
+}
+
+async function renderCompressedPage(pdf: Awaited<ReturnType<typeof getDocumentProxy>>, pageNumber: number) {
+  const canvasModule = await import('@napi-rs/canvas');
+  const rendered = new Uint8Array(
+    await renderPageAsImage(pdf, pageNumber, {
+      canvasImport: () => Promise.resolve(canvasModule),
+      width: OCR_IMAGE_WIDTH,
+    }),
+  );
+  const jpeg = await compressImageForOcr(rendered);
+  return {
+    pageNumber,
+    data: new Uint8Array(jpeg),
+    mediaType: 'image/jpeg' as const,
+    originalBytes: rendered.byteLength,
+    optimizedBytes: jpeg.byteLength,
+  };
+}
+
 async function extractScannedPdfMatches(input: Buffer, rows: CSVNormalizedRecord[]) {
   if (!process.env.GROQ_API_KEY || rows.length === 0) return null;
   const pdf = await getDocumentProxy(Uint8Array.from(input));
@@ -120,41 +171,56 @@ async function extractScannedPdfMatches(input: Buffer, rows: CSVNormalizedRecord
   let latencyMs = 0;
   let outputTokens = 0;
   let model = '';
+  const batches = Array.from(
+    { length: Math.ceil(pdf.numPages / OCR_BATCH_SIZE) },
+    (_, batchIndex) => {
+      const firstPage = batchIndex * OCR_BATCH_SIZE + 1;
+      return Array.from(
+        { length: Math.min(OCR_BATCH_SIZE, pdf.numPages - firstPage + 1) },
+        (_, index) => firstPage + index,
+      );
+    },
+  );
+  let nextBatch = 0;
 
-  for (let firstPage = 1; firstPage <= pdf.numPages; firstPage += OCR_BATCH_SIZE) {
-    const pageNumbers = Array.from(
-      { length: Math.min(OCR_BATCH_SIZE, pdf.numPages - firstPage + 1) },
-      (_, index) => firstPage + index,
-    );
-    const rendered = await Promise.all(
-      pageNumbers.map(async (pageNumber) => ({
-        pageNumber,
-        png: new Uint8Array(
-          await renderPageAsImage(pdf, pageNumber, {
-            canvasImport: () => import('@napi-rs/canvas'),
-            scale: 1.75,
-          }),
-        ),
-      })),
-    );
-    const batch = await extractUnitsFromScannedPages(rendered, expectedUnits);
-    console.info('[automatic-reconciliation] pdf-ocr-batch', {
-      firstPage,
-      lastPage: pageNumbers.at(-1),
-      totalPages: pdf.numPages,
-      matches: batch.items.length,
-      model: batch.model,
-      latencyMs: batch.latencyMs,
-    });
-    matches.push(...batch.items);
-    latencyMs += batch.latencyMs;
-    outputTokens += batch.outputTokens;
-    model = batch.model;
+  async function worker() {
+    while (nextBatch < batches.length) {
+      const batchIndex = nextBatch++;
+      const pageNumbers = batches[batchIndex];
+      const rendered = await Promise.all(
+        pageNumbers.map((pageNumber) => renderCompressedPage(pdf, pageNumber)),
+      );
+      const batch = await extractUnitsFromScannedPages(rendered, expectedUnits);
+      const originalBytes = rendered.reduce((total, page) => total + page.originalBytes, 0);
+      const optimizedBytes = rendered.reduce((total, page) => total + page.optimizedBytes, 0);
+      console.info('[automatic-reconciliation] pdf-ocr-batch', {
+        firstPage: pageNumbers[0],
+        lastPage: pageNumbers.at(-1),
+        totalPages: pdf.numPages,
+        matches: batch.items.length,
+        model: batch.model,
+        latencyMs: batch.latencyMs,
+        originalBytes,
+        optimizedBytes,
+        reductionPct: originalBytes
+          ? Math.round((1 - optimizedBytes / originalBytes) * 10_000) / 100
+          : 0,
+      });
+      matches.push(...batch.items);
+      latencyMs += batch.latencyMs;
+      outputTokens += batch.outputTokens;
+      model = batch.model;
+    }
   }
+
+  await Promise.all(
+    Array.from({ length: Math.min(OCR_CONCURRENCY, batches.length) }, () => worker()),
+  );
 
   const prompt = JSON.stringify({ expected_units: expectedUnits });
   return {
     notes: mapOcrMatchesToNotes(matches, rows),
+    markdownPages: buildOcrMarkdownPages(matches),
     metrics: {
       jsonChars: prompt.length,
       toonChars: prompt.length,
@@ -217,6 +283,13 @@ export async function extractDeliveryNotesFromPdf(
     if (ocr) {
       aiMetrics = ocr.metrics;
       for (const note of ocr.notes) notes.set(note.deliveryNoteNumber, note);
+      for (const page of pages) {
+        const markdown = ocr.markdownPages.get(page.pageNumber);
+        if (!markdown) continue;
+        page.markdown = markdown;
+        page.textSufficient = true;
+        page.needsOcr = false;
+      }
     }
   }
 

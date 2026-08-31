@@ -1,6 +1,6 @@
 # Sistema de Conciliación de Albaranes y Facturación
 
-Aplicación Next.js + Supabase para conciliar soportes PDF con unidades despachadas en CSV. La extracción documental puede usar MarkItDown y OCR selectivo, mientras que la conciliación, devoluciones y facturación se resuelven de forma determinística.
+Aplicación Next.js + Supabase para conciliar soportes PDF con unidades despachadas en CSV. La extracción documental usa texto nativo cuando existe y OCR visual optimizado para PDF escaneados, mientras que la conciliación, devoluciones y facturación se resuelven de forma determinística.
 
 ## Arquitectura
 
@@ -10,10 +10,10 @@ flowchart TD
   V --> E[AES-256-GCM envelope encryption]
   E --> S[Supabase Storage privado]
   S --> D[Descifrado server-side]
-  D --> M[DocumentProcessor / MarkItDown]
-  M --> P[Parser + clasificador de páginas]
-  P --> O[OCR solo páginas insuficientes/candidatas]
-  O --> T[Normalización / TOON]
+  D --> P[unpdf + clasificador de páginas]
+  P --> O[OCR visual hasta 80 páginas]
+  O --> C[JPEG optimizado + Markdown estructurado]
+  C --> T[Normalización / TOON]
   T --> G[Groq Structured Outputs]
   G --> N[Datos normalizados]
   N --> R[Motor determinístico de conciliación]
@@ -26,8 +26,9 @@ flowchart TD
 - **Next.js App Router / Node runtime** para UI, Auth y endpoints de dominio.
 - **Supabase Auth + RLS**: `viewer` puede leer resultados; `admin` realiza escrituras sensibles.
 - **Storage privado** y **cifrado a nivel de aplicación** mediante clave de datos aleatoria por archivo y una clave maestra de 32 bytes solo servidor.
-- **DocumentProcessor desacoplado**. `workers/python` contiene una implementación FastAPI/Docker con MarkItDown, PyMuPDF y Tesseract. Esto evita introducir un paquete Python pesado dentro de la función serverless de Next.js y permite migrar a Railway, Fly.io, Cloud Run, Render, ECS u otro worker sin alterar el dominio.
-- **Groq no calcula facturas**. Solo interviene cuando la estructura documental es ambigua. Los dos GPT-OSS configurados admiten Structured Outputs `json_schema` estricto.
+- **OCR visual serverless**. Los PDF escaneados de hasta 80 páginas se renderizan por lotes, se reducen a 1600 px, se convierten a JPEG y se procesan con concurrencia controlada para no agotar memoria.
+- **DocumentProcessor desacoplado opcional**. `workers/python` conserva una implementación FastAPI/Docker con MarkItDown, PyMuPDF y Tesseract para una futura ejecución dedicada.
+- **Groq no calcula facturas**. GPT-OSS estructura texto ambiguo y el modelo visual realiza OCR; ambos usan Structured Outputs validados antes de entrar en el motor determinístico.
 - **CSV real**: delimitador `;`, BOM UTF-8, UTF-8 y fallback Windows-1252/Latin-1. Cada fila se trata como una unidad.
 - **TOON** se aplica en `lib/ai/toon.ts` antes de Groq y registra reducción de caracteres y estimación de tokens.
 
@@ -64,11 +65,11 @@ Copiar `.env.example` a `.env.local`.
 - `GROQ_API_KEY`: secreto servidor.
 - `GROQ_PRIMARY_MODEL=openai/gpt-oss-120b`.
 - `GROQ_FAST_MODEL=openai/gpt-oss-20b`.
+- `GROQ_VISION_MODEL=qwen/qwen3.6-27b`.
 - `FILE_ENCRYPTION_KEY`: **32 bytes aleatorios codificados Base64**.
-- `APP_URL`: URL local o de Vercel.
 - `MAX_UPLOAD_MB`: límite de archivos (máximo efectivo de 4 MB por el límite de peticiones de Vercel Functions).
-- `DOCUMENT_PROCESSOR_URL`: URL interna/privada del worker Python.
-- `DOCUMENT_PROCESSOR_TOKEN`: secreto compartido con el worker.
+- `DOCUMENT_PROCESSOR_URL`: URL interna/privada del worker Python opcional.
+- `DOCUMENT_PROCESSOR_TOKEN`: secreto compartido con el worker opcional.
 
 Generar la clave de cifrado:
 
@@ -107,7 +108,19 @@ Todas las tablas sensibles tienen RLS. Las políticas usan `is_active_user()` o 
 
 Para verificarlo en staging, autenticar un usuario `viewer` y ejecutar un `insert` contra `billing_periods`: Supabase debe responder con violación de RLS.
 
-## Procesador documental / MarkItDown
+## Procesamiento documental
+
+La ruta automática en Vercel intenta primero extraer texto con `unpdf`. Cuando todo el PDF carece de texto seleccionable:
+
+1. Admite hasta 80 páginas.
+2. Renderiza lotes de tres páginas, con dos lotes concurrentes como máximo.
+3. Reduce cada página a 1600 px y la convierte a JPEG de calidad 68 para disminuir memoria y transferencia.
+4. Groq Vision devuelve exclusivamente unidades que también existan en el CSV.
+5. La aplicación vuelve a validar cada unidad y genera Markdown estructurado por página.
+
+El PDF original no se modifica: permanece cifrado en Supabase. La optimización es una representación temporal en memoria utilizada únicamente durante el análisis.
+
+### Worker MarkItDown opcional
 
 El worker acepta **solo rutas locales** ya validadas por la aplicación. No recibe URLs arbitrarias. Valida `%PDF-` y SHA-256. Por página:
 
@@ -133,7 +146,7 @@ En producción, se recomienda desplegar este worker separado de Vercel y restrin
 
 `lib/ai/groq.ts` utiliza Vercel AI SDK, el proveedor Groq y salida estructurada validada con Zod. El prompt prohíbe cálculos contables e invención. Cada ejecución persiste modelo, tamaño de entrada, tokens, latencia y estado en `ai_runs`.
 
-La estrategia es: extracción serverless con `unpdf` → parser determinístico/regex → Groq para estructuración ambigua. El worker MarkItDown/Tesseract queda como vía OCR para PDF escaneados.
+La estrategia es: extracción serverless con `unpdf` → parser determinístico/regex → OCR visual comprimido cuando no hay texto → Groq para estructuración ambigua → validación estricta contra el CSV. El worker MarkItDown/Tesseract queda como alternativa opcional para despliegues dedicados.
 
 ## Procesamiento automático
 
@@ -210,9 +223,9 @@ GitHub Actions ejecuta lint, typecheck, Vitest y build. No guardar `.env.local` 
 ## Vercel
 
 1. Importar el repositorio GitHub.
-2. Agregar todas las variables de `.env.example` en Project Settings → Environment Variables.
-3. Definir `APP_URL` con el dominio de producción.
-4. No desplegar el worker Python pesado dentro del bundle Next.js; usar `DOCUMENT_PROCESSOR_URL` hacia el worker separado.
+2. Agregar las variables requeridas de Supabase, cifrado y Groq indicadas en `.env.example`.
+3. Mantener `maxDuration = 300` en las rutas de carga y análisis para el OCR mensual.
+4. Si se utiliza el worker Python opcional, desplegarlo por separado y configurar `DOCUMENT_PROCESSOR_URL` y `DOCUMENT_PROCESSOR_TOKEN`.
 5. Desplegar. Vercel ejecutará `npm run build`.
 
 ## Seguridad operacional
@@ -228,7 +241,7 @@ GitHub Actions ejecuta lint, typecheck, Vitest y build. No guardar `.env.local` 
 ## Limitaciones conocidas de esta entrega
 
 - El PDF `FRA 3282-HOSPITAL DE ALTA COMPLEJIDAD.pdf` y el CSV `UnitsSentToOtherCentres.csv` **no estaban adjuntos en el mensaje que originó este repositorio**, por lo que no se afirma que el parser haya sido validado contra esos binarios reales. Se incluye un fixture anonimizado conforme a los conteos indicados para 143909.
-- Los PDF sin capa de texto requieren desplegar el worker OCR de `workers/python`; la ruta serverless automática procesa directamente PDF con texto seleccionable.
+- El OCR automático admite hasta 80 páginas y depende de los límites de uso de la cuenta Groq. Documentos mayores requieren un worker duradero o cola.
 - Los formularios avanzados de mantenimiento de precios, decisiones manuales y exportación XLSX/PDF siguen pendientes.
 - Tesseract español se instala en el Docker del worker; documentos manuscritos pueden requerir un motor de visión adicional.
 

@@ -138,7 +138,9 @@ export function DocumentUploadForm() {
       <h2 id="upload-title">Subir documentos</h2>
       <p className="muted">
         Admite PDF y CSV de hasta 4 MB. Los archivos se cifran antes de guardarse
-        en el bucket privado de Supabase.
+        en el bucket privado de Supabase. Los PDF escaneados de hasta 80 páginas
+        se optimizan al extremo y se convierten en datos Markdown para el análisis
+        mensual con IA.
       </p>
       <form className="upload-form" onSubmit={handleSubmit}>
         <label htmlFor="document-files">Archivos</label>

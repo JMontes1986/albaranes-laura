@@ -15,7 +15,8 @@ const ScannedPageSchema = z.object({
 
 export type ScannedPageImage = {
   pageNumber: number;
-  png: Uint8Array;
+  data: Uint8Array;
+  mediaType: 'image/jpeg' | 'image/png';
 };
 
 const Item = z.object({
@@ -104,8 +105,8 @@ export async function extractUnitsFromScannedPages(
           },
           ...pages.map((page) => ({
             type: 'file' as const,
-            mediaType: 'image/png',
-            data: page.png,
+            mediaType: page.mediaType,
+            data: page.data,
           })),
         ],
       },
