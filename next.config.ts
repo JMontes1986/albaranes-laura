@@ -1,6 +1,7 @@
 import type { NextConfig } from 'next';
 const nextConfig: NextConfig = {
   poweredByHeader: false,
+  serverExternalPackages: ['@napi-rs/canvas'],
   experimental: { serverActions: { bodySizeLimit: '2mb' } },
   async headers() {
     return [{ source: '/(.*)', headers: [

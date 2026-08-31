@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { findExactCsvMatches } from '@/lib/documents/pdf-extractor';
+import { findExactCsvMatches, mapOcrMatchesToNotes } from '@/lib/documents/pdf-extractor';
 import type { CSVNormalizedRecord } from '@/lib/csv/parser';
 
 describe('PDF exact unit matching', () => {
@@ -48,6 +48,39 @@ describe('PDF exact unit matching', () => {
     expect(notes[0]).toMatchObject({
       deliveryNoteNumber: '143909',
       pageNumber: 4,
+      items: [{ componentCode: 'GRPL', unitNumber: '2631010001 00' }],
+    });
+  });
+
+  it('accepts OCR results only when they match an expected CSV unit', () => {
+    const rows: CSVNormalizedRecord[] = [
+      {
+        deliveryNoteNumber: '143909',
+        componentCode: 'GRPL',
+        component: 'Glóbulos rojos',
+        dispatchDate: '2026-08-23',
+        time: '10:00',
+        unitNumber: '2631010001 00',
+        bloodGroup: 'O-',
+        expirationDate: '2026-08-30',
+        returned: false,
+        raw: {},
+      },
+    ];
+
+    const notes = mapOcrMatchesToNotes(
+      [
+        { unit_number: '2631010001-00', page_number: 2, confidence: 0.94 },
+        { unit_number: 'INVENTADA-99', page_number: 2, confidence: 1 },
+      ],
+      rows,
+    );
+
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toMatchObject({
+      deliveryNoteNumber: '143909',
+      pageNumber: 2,
+      confidence: 0.94,
       items: [{ componentCode: 'GRPL', unitNumber: '2631010001 00' }],
     });
   });

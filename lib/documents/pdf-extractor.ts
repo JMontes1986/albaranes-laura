@@ -1,5 +1,8 @@
-import { extractText } from 'unpdf';
-import { extractAmbiguousDeliveryData } from '@/lib/ai/groq';
+import { extractText, getDocumentProxy, renderPageAsImage } from 'unpdf';
+import {
+  extractAmbiguousDeliveryData,
+  extractUnitsFromScannedPages,
+} from '@/lib/ai/groq';
 import { classifyPage, parseDeliveryPage } from './delivery-parser';
 import type { CSVNormalizedRecord } from '@/lib/csv/parser';
 import type { PDFDeliveryNote, PDFItem } from '@/lib/reconciliation/types';
@@ -13,6 +16,9 @@ export type ExtractedPdfPage = {
 };
 
 type AiMetrics = Awaited<ReturnType<typeof extractAmbiguousDeliveryData>>['metrics'];
+
+const OCR_BATCH_SIZE = 5;
+const OCR_MAX_PAGES = 50;
 
 function normalize(value: string) {
   return value.trim().replace(/\s+/g, ' ').toUpperCase();
@@ -74,6 +80,93 @@ export function findExactCsvMatches(
   return [...notes.values()];
 }
 
+export function mapOcrMatchesToNotes(
+  matches: Array<{ unit_number: string; page_number: number; confidence: number }>,
+  rows: CSVNormalizedRecord[],
+) {
+  const rowsByUnit = new Map(rows.map((row) => [searchable(row.unitNumber), row]));
+  const notes = new Map<string, PDFDeliveryNote>();
+
+  for (const match of matches) {
+    const row = rowsByUnit.get(searchable(match.unit_number));
+    if (!row) continue;
+    const current = notes.get(row.deliveryNoteNumber) ?? {
+      deliveryNoteNumber: row.deliveryNoteNumber,
+      dispatchDate: row.dispatchDate,
+      pageNumber: match.page_number,
+      confidence: match.confidence,
+      items: [],
+    };
+    current.confidence = Math.max(current.confidence, match.confidence);
+    mergeItem(current, {
+      componentCode: row.componentCode,
+      unitNumber: row.unitNumber,
+      bloodGroup: row.bloodGroup,
+      expirationDate: row.expirationDate,
+    });
+    notes.set(row.deliveryNoteNumber, current);
+  }
+
+  return [...notes.values()];
+}
+
+async function extractScannedPdfMatches(input: Buffer, rows: CSVNormalizedRecord[]) {
+  if (!process.env.GROQ_API_KEY || rows.length === 0) return null;
+  const pdf = await getDocumentProxy(Uint8Array.from(input));
+  if (pdf.numPages > OCR_MAX_PAGES) throw new Error('PDF_OCR_PAGE_LIMIT');
+
+  const expectedUnits = [...new Set(rows.map((row) => row.unitNumber))].slice(0, 500);
+  const matches: Array<{ unit_number: string; page_number: number; confidence: number }> = [];
+  let latencyMs = 0;
+  let outputTokens = 0;
+  let model = '';
+
+  for (let firstPage = 1; firstPage <= pdf.numPages; firstPage += OCR_BATCH_SIZE) {
+    const pageNumbers = Array.from(
+      { length: Math.min(OCR_BATCH_SIZE, pdf.numPages - firstPage + 1) },
+      (_, index) => firstPage + index,
+    );
+    const rendered = await Promise.all(
+      pageNumbers.map(async (pageNumber) => ({
+        pageNumber,
+        png: new Uint8Array(
+          await renderPageAsImage(pdf, pageNumber, {
+            canvasImport: () => import('@napi-rs/canvas'),
+            scale: 1.75,
+          }),
+        ),
+      })),
+    );
+    const batch = await extractUnitsFromScannedPages(rendered, expectedUnits);
+    console.info('[automatic-reconciliation] pdf-ocr-batch', {
+      firstPage,
+      lastPage: pageNumbers.at(-1),
+      totalPages: pdf.numPages,
+      matches: batch.items.length,
+      model: batch.model,
+      latencyMs: batch.latencyMs,
+    });
+    matches.push(...batch.items);
+    latencyMs += batch.latencyMs;
+    outputTokens += batch.outputTokens;
+    model = batch.model;
+  }
+
+  const prompt = JSON.stringify({ expected_units: expectedUnits });
+  return {
+    notes: mapOcrMatchesToNotes(matches, rows),
+    metrics: {
+      jsonChars: prompt.length,
+      toonChars: prompt.length,
+      reductionPct: 0,
+      estimatedTokens: Math.ceil(prompt.length / 4),
+      model,
+      latencyMs,
+      outputTokens,
+    } satisfies AiMetrics,
+  };
+}
+
 export async function extractDeliveryNotesFromPdf(
   input: Buffer,
   expectedRows: CSVNormalizedRecord[] = [],
@@ -118,6 +211,14 @@ export async function extractDeliveryNotesFromPdf(
   const readablePages = pages.filter((page) => page.markdown.trim().length >= 20);
   const candidates = explicitCandidates.length > 0 ? explicitCandidates : readablePages;
   let aiMetrics: AiMetrics | null = null;
+
+  if (readablePages.length === 0) {
+    const ocr = await extractScannedPdfMatches(input, expectedRows);
+    if (ocr) {
+      aiMetrics = ocr.metrics;
+      for (const note of ocr.notes) notes.set(note.deliveryNoteNumber, note);
+    }
+  }
 
   if (candidates.length > 0 && process.env.GROQ_API_KEY) {
     let remainingCharacters = 120_000;
@@ -168,8 +269,10 @@ export async function extractDeliveryNotesFromPdf(
   const deliveryNotes = [...notes.values()].filter((note) => note.items.length > 0);
   if (deliveryNotes.length === 0) {
     throw new Error(
-      readablePages.length === 0
-        ? 'PDF_WITHOUT_EXTRACTABLE_TEXT'
+      readablePages.length === 0 && aiMetrics
+        ? 'PDF_OCR_NO_MATCHES'
+        : readablePages.length === 0
+          ? 'PDF_WITHOUT_EXTRACTABLE_TEXT'
         : 'PDF_NO_DELIVERY_ITEMS',
     );
   }

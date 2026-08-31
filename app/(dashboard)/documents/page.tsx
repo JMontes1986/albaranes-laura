@@ -29,6 +29,12 @@ function processingErrorMessage(error: string | null | undefined) {
   if (error === 'PDF_WITHOUT_EXTRACTABLE_TEXT') {
     return 'El PDF no contiene texto seleccionable. Necesita procesamiento OCR.';
   }
+  if (error === 'PDF_OCR_NO_MATCHES') {
+    return 'El OCR leyó las páginas, pero no encontró en el PDF ninguna unidad incluida en el CSV.';
+  }
+  if (error === 'PDF_OCR_PAGE_LIMIT') {
+    return 'El PDF supera el límite de 50 páginas admitido para OCR automático.';
+  }
   if (error?.includes('GROQ')) {
     return 'La extracción con IA no respondió correctamente. Revisa GROQ_API_KEY.';
   }
