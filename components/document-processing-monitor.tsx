@@ -30,7 +30,6 @@ export function DocumentProcessingMonitor({
   processingStage,
 }: Props) {
   const router = useRouter();
-  const attempted = useRef(false);
   const recoveryAttempted = useRef(false);
   const [startError, setStartError] = useState('');
   const [retrying, setRetrying] = useState(false);
@@ -60,31 +59,37 @@ export function DocumentProcessingMonitor({
   }
 
   useEffect(() => {
-    if (!hasPendingPair) {
-      attempted.current = false;
-      return;
-    }
-    if (attempted.current) return;
-    attempted.current = true;
+    if (!hasPendingPair) return;
     let active = true;
-    fetch('/api/reconciliations/automatic', { method: 'POST' })
-      .then((response) => {
+    let inFlight = false;
+    async function startNextBatch() {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const response = await fetch('/api/reconciliations/automatic', {
+          method: 'POST',
+        });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         if (active) router.refresh();
-      })
-      .catch(() => {
+      } catch {
         if (active) setStartError('No se pudo iniciar el análisis automático.');
-      });
+      } finally {
+        inFlight = false;
+      }
+    }
+    void startNextBatch();
+    const timer = window.setInterval(startNextBatch, 8_000);
     return () => {
       active = false;
+      window.clearInterval(timer);
     };
   }, [hasPendingPair, router]);
 
   useEffect(() => {
-    if (!isProcessing) return;
+    if (!isProcessing && !(hasPendingPair && processingStartedAt)) return;
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
     return () => window.clearInterval(timer);
-  }, [isProcessing, processingStartedAt]);
+  }, [hasPendingPair, isProcessing, processingStartedAt]);
 
   useEffect(() => {
     if (!isProcessing || inactivity < PROCESSING_STALE_MS) {
@@ -123,10 +128,10 @@ export function DocumentProcessingMonitor({
 
   return (
     <section className="processing-notice" aria-live="polite">
-      {hasPendingPair ? (
+      {hasPendingPair && !processingStartedAt ? (
         <p>Preparando el análisis automático del PDF y el CSV…</p>
       ) : null}
-      {isProcessing ? (
+      {isProcessing || (hasPendingPair && processingStartedAt) ? (
         <div className="processing-details">
           <p>
             {processingStage ||

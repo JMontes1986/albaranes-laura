@@ -43,10 +43,10 @@ function processingErrorMessage(error: string | null | undefined) {
     error?.includes('tokens per minute (TPM)') ||
     error?.includes('Request too large for model')
   ) {
-    return 'El análisis visual anterior superó el límite de Groq. El nuevo OCR local divide el PDF automáticamente; pulsa Reintentar análisis.';
+    return 'Groq alcanzó su límite temporal. El OCR visual continuará automáticamente página por página.';
   }
   if (error?.includes('GROQ')) {
-    return 'La extracción con IA no respondió correctamente. Revisa GROQ_API_KEY.';
+    return 'El OCR visual no respondió correctamente. Revisa GROQ_API_KEY y que qwen/qwen3.6-27b esté disponible.';
   }
   return error ? `Detalle técnico: ${error}` : 'No se registró el detalle del fallo.';
 }
@@ -83,9 +83,14 @@ export default async function DocumentsPage() {
       ['extracting', 'analyzing', 'reconciling'].includes(document?.status ?? ''),
     ),
   );
-  const processingDocument = latestDocuments.find((document) =>
-    ['extracting', 'analyzing', 'reconciling'].includes(document?.status ?? ''),
-  );
+  const processingDocument =
+    latestDocuments.find((document) =>
+      ['extracting', 'analyzing', 'reconciling'].includes(document?.status ?? ''),
+    ) ??
+    latestDocuments.find(
+      (document) =>
+        document?.status === 'pending' && Boolean(document.processing_started_at),
+    );
   const hasFailed = Boolean(
     latestDocuments.some((document) => document?.status === 'failed'),
   );

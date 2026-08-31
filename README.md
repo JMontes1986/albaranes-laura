@@ -1,6 +1,6 @@
 # Sistema de Conciliación de Albaranes y Facturación
 
-Aplicación Next.js + Supabase para conciliar soportes PDF con unidades despachadas en CSV. La extracción documental usa texto nativo cuando existe y OCR local optimizado para PDF escaneados, mientras que la conciliación, devoluciones y facturación se resuelven de forma determinística.
+Aplicación Next.js + Supabase para conciliar soportes PDF con unidades despachadas en CSV. La extracción documental usa texto nativo cuando existe y OCR visual de Groq para PDF escaneados, mientras que la conciliación, devoluciones y facturación se resuelven de forma determinística.
 
 ## Arquitectura
 
@@ -11,7 +11,7 @@ flowchart TD
   E --> S[Supabase Storage privado]
   S --> D[Descifrado server-side]
   D --> P[unpdf + clasificador de páginas]
-  P --> O[Tesseract.js local hasta 80 páginas]
+  P --> O[Groq Vision por página hasta 80 páginas]
   O --> C[JPEG optimizado + Markdown estructurado]
   C --> T[Normalización / TOON]
   T --> G[Groq Structured Outputs]
@@ -26,9 +26,9 @@ flowchart TD
 - **Next.js App Router / Node runtime** para UI, Auth y endpoints de dominio.
 - **Supabase Auth + RLS**: `viewer` puede leer resultados; `admin` realiza escrituras sensibles.
 - **Storage privado** y **cifrado a nivel de aplicación** mediante clave de datos aleatoria por archivo y una clave maestra de 32 bytes solo servidor.
-- **OCR local serverless**. Los PDF escaneados de hasta 80 páginas se renderizan por lotes, se reducen a 1600 px, se convierten a JPEG y se leen con Tesseract.js sin consumir tokens visuales.
+- **OCR visual reanudable**. Los PDF escaneados de hasta 80 páginas se reducen a JPEG y se envían de una en una a Qwen Vision. Cada resultado se guarda antes de continuar y se limita la frecuencia para respetar el TPM de Groq.
 - **DocumentProcessor desacoplado opcional**. `workers/python` conserva una implementación FastAPI/Docker con MarkItDown, PyMuPDF y Tesseract para una futura ejecución dedicada.
-- **Groq no calcula facturas ni procesa imágenes**. GPT-OSS solo estructura texto ambiguo mediante Structured Outputs validados antes de entrar en el motor determinístico.
+- **Groq no calcula facturas**. Qwen procesa las páginas escaneadas y GPT-OSS estructura texto ambiguo; los resultados se validan antes de entrar en el motor determinístico.
 - **CSV real**: delimitador `;`, BOM UTF-8, UTF-8 y fallback Windows-1252/Latin-1. Cada fila se trata como una unidad.
 - **TOON** se aplica en `lib/ai/toon.ts` antes de Groq y registra reducción de caracteres y estimación de tokens.
 
@@ -112,9 +112,9 @@ Para verificarlo en staging, autenticar un usuario `viewer` y ejecutar un `inser
 La ruta automática en Vercel intenta primero extraer texto con `unpdf`. Cuando todo el PDF carece de texto seleccionable:
 
 1. Admite hasta 80 páginas.
-2. Renderiza lotes de tres páginas, con dos lotes concurrentes como máximo.
+2. Renderiza una página por ejecución para mantener bajo el uso de memoria.
 3. Reduce cada página a 1600 px y la convierte a JPEG de calidad 68 para disminuir memoria y transferencia.
-4. Dos trabajadores Tesseract.js reutilizables reconocen el texto localmente.
+4. Qwen Vision reconoce únicamente identificadores visibles, sin recibir el CSV completo.
 5. La aplicación valida cada unidad contra el CSV y genera Markdown estructurado por página.
 
 El PDF original no se modifica: permanece cifrado en Supabase. La optimización es una representación temporal en memoria utilizada únicamente durante el análisis.
@@ -145,7 +145,7 @@ En producción, se recomienda desplegar este worker separado de Vercel y restrin
 
 `lib/ai/groq.ts` utiliza Vercel AI SDK, el proveedor Groq y salida estructurada validada con Zod. El prompt prohíbe cálculos contables e invención. Cada ejecución persiste modelo, tamaño de entrada, tokens, latencia y estado en `ai_runs`.
 
-La estrategia es: extracción serverless con `unpdf` → parser determinístico/regex → OCR local comprimido para las páginas sin texto → Groq únicamente para estructuración textual ambigua → validación estricta contra el CSV. El worker MarkItDown/Tesseract queda como alternativa opcional para despliegues dedicados.
+La estrategia es: extracción serverless con `unpdf` → parser determinístico/regex → OCR visual comprimido y reanudable para páginas sin texto → estructuración textual ambigua → validación estricta contra el CSV. El worker MarkItDown/Tesseract queda como alternativa opcional para despliegues dedicados.
 
 ## Procesamiento automático
 

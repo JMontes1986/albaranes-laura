@@ -5,6 +5,7 @@ import { extractDeliveryNotesFromPdf } from '@/lib/documents/pdf-extractor';
 import {
   EXTRACTION_TIMEOUT_MS,
   OCR_PAGES_PER_RUN,
+  OCR_REQUEST_COOLDOWN_MS,
   PROCESSING_STALE_MS,
   isProcessingStatus,
 } from '@/lib/documents/processing';
@@ -33,12 +34,13 @@ type DocumentRow = {
   created_at: string;
   processing_started_at: string | null;
   processing_progress: number;
+  processing_updated_at: string | null;
 };
 
 export type ClaimedPair = { pdf: DocumentRow; csv: DocumentRow; userId: string };
 
 const documentFields =
-  'id,document_type,storage_path,encrypted_file_key,iv,auth_tag,key_iv,key_auth_tag,sha256,status,uploaded_by,created_at,processing_started_at,processing_progress';
+  'id,document_type,storage_path,encrypted_file_key,iv,auth_tag,key_iv,key_auth_tag,sha256,status,uploaded_by,created_at,processing_started_at,processing_progress,processing_updated_at';
 
 function key(delivery: string, component: string, unit: string) {
   return `${delivery.trim().toUpperCase()}::${component.trim().toUpperCase()}::${unit
@@ -91,6 +93,18 @@ async function claimPair(
   const pdf = documents.find((document) => document.document_type === 'pdf_support');
   const csv = documents.find((document) => document.document_type === 'csv_units');
   if (!pdf || !csv) return null;
+
+  if (sourceStatus === 'pending' && Math.max(pdf.processing_progress, csv.processing_progress) > 2) {
+    const lastUpdate = Date.parse(
+      pdf.processing_updated_at ?? csv.processing_updated_at ?? pdf.created_at,
+    );
+    if (
+      Number.isFinite(lastUpdate) &&
+      Date.now() - lastUpdate < OCR_REQUEST_COOLDOWN_MS
+    ) {
+      return null;
+    }
+  }
 
   const ids = [pdf.id, csv.id];
   const now = new Date().toISOString();
@@ -609,6 +623,25 @@ export async function processClaimedPair(pair: ClaimedPair) {
   } catch (cause) {
     const message = errorMessage(cause);
     console.error('[automatic-reconciliation]', message);
+    if (
+      message.startsWith('GROQ_RATE_LIMIT:') ||
+      message.startsWith('GROQ_TRANSIENT:')
+    ) {
+      const rateLimited = message.startsWith('GROQ_RATE_LIMIT:');
+      await setDocumentStatus(
+        documentIds,
+        'pending',
+        Math.max(pair.pdf.processing_progress, pair.csv.processing_progress, 10),
+        rateLimited
+          ? 'Groq alcanzó su límite temporal. Reintentando automáticamente'
+          : 'La página no respondió. Reintentando automáticamente',
+      );
+      return {
+        reconciliationId: null,
+        continuation: true,
+        rateLimited,
+      };
+    }
     await Promise.all([
       admin
         .from('documents')

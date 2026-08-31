@@ -1,6 +1,6 @@
 import { getDocumentProxy, renderPageAsImage } from 'unpdf';
 import { extractAmbiguousDeliveryData } from '@/lib/ai/groq';
-import { createLocalOcrPool, type LocalOcrResult } from './local-ocr';
+import { createVisionOcrPool, type VisionOcrResult } from './vision-ocr';
 import { classifyPage, parseDeliveryPage } from './delivery-parser';
 import type { CSVNormalizedRecord } from '@/lib/csv/parser';
 import type { PDFDeliveryNote, PDFItem } from '@/lib/reconciliation/types';
@@ -28,8 +28,8 @@ type ExtractionOptions = {
     totalPages: number,
   ) => Promise<void> | void;
   onOcrProgress?: (completedPages: number, totalPages: number) => Promise<void> | void;
-  onOcrBatch?: (results: LocalOcrResult[]) => Promise<void> | void;
-  cachedOcrResults?: LocalOcrResult[];
+  onOcrBatch?: (results: VisionOcrResult[]) => Promise<void> | void;
+  cachedOcrResults?: VisionOcrResult[];
   maxOcrPages?: number;
 };
 
@@ -188,7 +188,7 @@ export function mapOcrMatchesToNotes(
 }
 
 export function buildOcrMarkdownPages(
-  results: LocalOcrResult[],
+  results: VisionOcrResult[],
 ) {
   return new Map(
     results.map((result) => [
@@ -199,7 +199,7 @@ export function buildOcrMarkdownPages(
 }
 
 export function findExpectedUnitsInOcr(
-  results: LocalOcrResult[],
+  results: VisionOcrResult[],
   rows: CSVNormalizedRecord[],
 ) {
   const matches: Array<{
@@ -286,9 +286,9 @@ async function extractScannedPdfMatches(
   const totalOcrPages = pageNumbers.length;
   let nextBatch = 0;
   let completedPages = cachedResults.length;
-  const ocrResults: LocalOcrResult[] = [...cachedResults];
+  const ocrResults: VisionOcrResult[] = [...cachedResults];
   const ocrPool =
-    batches.length > 0 ? await createLocalOcrPool(OCR_CONCURRENCY) : null;
+    batches.length > 0 ? createVisionOcrPool(options.signal) : null;
 
   async function worker() {
     while (nextBatch < batches.length) {
@@ -309,7 +309,7 @@ async function extractScannedPdfMatches(
         lastPage: batchPages.at(-1),
         totalPages: pdf.numPages,
         recognizedCharacters: batch.reduce((total, page) => total + page.text.length, 0),
-        engine: 'tesseract.js',
+        engine: 'groq-vision',
         latencyMs: Date.now() - started,
         originalBytes,
         optimizedBytes,

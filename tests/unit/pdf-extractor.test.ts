@@ -9,7 +9,6 @@ import {
   selectOcrPagesForRun,
 } from '@/lib/documents/pdf-extractor';
 import type { CSVNormalizedRecord } from '@/lib/csv/parser';
-import { recognizePageImages } from '@/lib/documents/local-ocr';
 
 describe('PDF exact unit matching', () => {
   it('continues with only the next uncached OCR pages', () => {
@@ -104,7 +103,7 @@ describe('PDF exact unit matching', () => {
     expect(buildOcrMarkdownPages(ocrResults).get(2)).toContain('2631010001-00');
   });
 
-  it('compresses and recognizes a rendered page without Qwen vision', async () => {
+  it('compresses a rendered page for Groq vision', async () => {
     const { createCanvas } = await import('@napi-rs/canvas');
     const canvas = createCanvas(1_200, 500);
     const context = canvas.getContext('2d');
@@ -119,10 +118,6 @@ describe('PDF exact unit matching', () => {
     );
 
     expect([...jpeg.slice(0, 3)]).toEqual([0xff, 0xd8, 0xff]);
-    const [recognized] = await recognizePageImages(
-      [{ pageNumber: 1, data: jpeg }],
-      1,
-    );
-    expect(recognized.text.replace(/[^0-9]/g, '')).toContain('263101000100');
+    expect(jpeg.byteLength).toBeGreaterThan(100);
   });
 });
