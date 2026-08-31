@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { extractIdentifiersFromImage } from '@/lib/ai/groq';
+import {
+  extractIdentifiersFromImage,
+  extractIdentifiersFromImages,
+} from '@/lib/ai/groq';
 
 describe('Groq vision OCR', () => {
   afterEach(() => {
@@ -35,9 +38,10 @@ describe('Groq vision OCR', () => {
       max_completion_tokens: 300,
     });
     expect(body).not.toHaveProperty('response_format');
-    expect(body.messages[0].content[1].image_url.url).toMatch(
-      /^data:image\/jpeg;base64,/,
+    const imagePart = body.messages[0].content.find(
+      (part: { type: string }) => part.type === 'image_url',
     );
+    expect(imagePart.image_url.url).toMatch(/^data:image\/jpeg;base64,/);
   });
 
   it('exposes rate limiting as a resumable error', async () => {
@@ -55,6 +59,38 @@ describe('Groq vision OCR', () => {
     await expect(
       extractIdentifiersFromImage(new Uint8Array([1])),
     ).rejects.toThrow('GROQ_RATE_LIMIT:tokens per minute exceeded');
+  });
+
+  it('extracts two pages in one visual request', async () => {
+    process.env.GROQ_API_KEY = 'test-key';
+    const request = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          choices: [
+            { message: { content: '12|UNIT-A\n13|UNIT-B' } },
+          ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    vi.stubGlobal('fetch', request);
+
+    const result = await extractIdentifiersFromImages([
+      { pageNumber: 12, image: new Uint8Array([1]) },
+      { pageNumber: 13, image: new Uint8Array([2]) },
+    ]);
+
+    expect(result.pages).toEqual([
+      { pageNumber: 12, tokens: ['UNIT-A'] },
+      { pageNumber: 13, tokens: ['UNIT-B'] },
+    ]);
+    const [, options] = request.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(String(options.body));
+    expect(
+      body.messages[0].content.filter(
+        (part: { type: string }) => part.type === 'image_url',
+      ),
+    ).toHaveLength(2);
   });
 
   it('treats temporary provider failures as resumable', async () => {

@@ -1,4 +1,4 @@
-import { extractIdentifiersFromImage } from '@/lib/ai/groq';
+import { extractIdentifiersFromImages } from '@/lib/ai/groq';
 
 export type VisionOcrPage = {
   pageNumber: number;
@@ -14,16 +14,18 @@ export type VisionOcrResult = {
 export function createVisionOcrPool(abortSignal?: AbortSignal) {
   return {
     async recognize(pages: VisionOcrPage[]): Promise<VisionOcrResult[]> {
-      const results: VisionOcrResult[] = [];
-      for (const page of pages) {
-        const result = await extractIdentifiersFromImage(page.data, abortSignal);
-        results.push({
+      const result = await extractIdentifiersFromImages(
+        pages.map((page) => ({
           pageNumber: page.pageNumber,
-          text: result.tokens.join('\n'),
-          confidence: 0.95,
-        });
-      }
-      return results;
+          image: page.data,
+        })),
+        abortSignal,
+      );
+      return result.pages.map((page) => ({
+        pageNumber: page.pageNumber,
+        text: page.tokens.join('\n'),
+        confidence: 0.95,
+      }));
     },
     async terminate() {},
   };

@@ -29,11 +29,17 @@ function groqErrorDetail(payload: unknown) {
   return typeof message === 'string' ? message.slice(0, 400) : 'unknown';
 }
 
-export async function extractIdentifiersFromImage(
-  image: Uint8Array,
+type VisionImage = {
+  pageNumber: number;
+  image: Uint8Array;
+};
+
+export async function extractIdentifiersFromImages(
+  images: VisionImage[],
   abortSignal?: AbortSignal,
 ) {
   if (!process.env.GROQ_API_KEY) throw new Error('GROQ_API_KEY missing');
+  if (images.length === 0) return { pages: [], model: '' };
   const model = process.env.GROQ_VISION_MODEL || 'qwen/qwen3.6-27b';
   const pageTimeout = AbortSignal.timeout(45_000);
   const signal = abortSignal
@@ -56,14 +62,20 @@ export async function extractIdentifiersFromImage(
               {
                 type: 'text',
                 text:
-                  'Realiza OCR literal de esta página de un albarán. Devuelve únicamente los números de unidad, códigos alfanuméricos, números de albarán y fechas visibles, un valor por línea. No uses JSON, Markdown ni explicaciones. No inventes valores.',
+                  'Realiza OCR literal de estas páginas de un albarán. Devuelve únicamente los números de unidad, códigos alfanuméricos, números de albarán y fechas visibles. Escribe un valor por línea con el formato NUMERO_PAGINA|VALOR. No uses JSON, Markdown ni explicaciones. No inventes valores.',
               },
-              {
-                type: 'image_url',
-                image_url: {
-                  url: `data:image/jpeg;base64,${Buffer.from(image).toString('base64')}`,
+              ...images.flatMap(({ pageNumber, image }) => [
+                {
+                  type: 'text' as const,
+                  text: `PÁGINA ${pageNumber}`,
                 },
-              },
+                {
+                  type: 'image_url' as const,
+                  image_url: {
+                    url: `data:image/jpeg;base64,${Buffer.from(image).toString('base64')}`,
+                  },
+                },
+              ]),
             ],
           },
         ],
@@ -91,13 +103,47 @@ export async function extractIdentifiersFromImage(
   }
   const content = payload.choices?.[0]?.message?.content;
   if (!content) throw new Error('GROQ_VISION_EMPTY');
-  const tokens = content
+  const requestedPages = new Set(images.map((image) => image.pageNumber));
+  const tokensByPage = new Map<number, string[]>(
+    images.map((image) => [image.pageNumber, []]),
+  );
+  const unassigned: string[] = [];
+  const lines = content
     .split(/\r?\n/)
     .map((line) => line.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, '').trim())
     .filter((line) => line.length > 0 && line.length <= 200)
     .slice(0, 300);
-  if (tokens.length === 0) throw new Error('GROQ_VISION_EMPTY');
-  return { tokens, model };
+  for (const line of lines) {
+    const tagged = line.match(/^\s*(?:P(?:Á|A)GINA\s*)?(\d+)\s*[|:]\s*(.+)$/i);
+    const pageNumber = tagged ? Number(tagged[1]) : Number.NaN;
+    if (tagged && requestedPages.has(pageNumber)) {
+      tokensByPage.get(pageNumber)?.push(tagged[2].trim());
+    } else {
+      unassigned.push(line);
+    }
+  }
+  if (lines.length === 0) throw new Error('GROQ_VISION_EMPTY');
+  if (unassigned.length > 0) {
+    for (const tokens of tokensByPage.values()) tokens.push(...unassigned);
+  }
+  return {
+    pages: images.map(({ pageNumber }) => ({
+      pageNumber,
+      tokens: tokensByPage.get(pageNumber) ?? [],
+    })),
+    model,
+  };
+}
+
+export async function extractIdentifiersFromImage(
+  image: Uint8Array,
+  abortSignal?: AbortSignal,
+) {
+  const result = await extractIdentifiersFromImages(
+    [{ pageNumber: 1, image }],
+    abortSignal,
+  );
+  return { tokens: result.pages[0]?.tokens ?? [], model: result.model };
 }
 
 export async function extractAmbiguousDeliveryData(

@@ -15,7 +15,7 @@ export type ExtractedPdfPage = {
 
 type AiMetrics = Awaited<ReturnType<typeof extractAmbiguousDeliveryData>>['metrics'];
 
-const OCR_BATCH_SIZE = 1;
+const OCR_BATCH_SIZE = 2;
 const OCR_CONCURRENCY = 1;
 export const OCR_MAX_PAGES = 80;
 const OCR_IMAGE_WIDTH = 1_600;

@@ -112,9 +112,9 @@ Para verificarlo en staging, autenticar un usuario `viewer` y ejecutar un `inser
 La ruta automática en Vercel intenta primero extraer texto con `unpdf`. Cuando todo el PDF carece de texto seleccionable:
 
 1. Admite hasta 80 páginas.
-2. Renderiza una página por ejecución para mantener bajo el uso de memoria.
+2. Renderiza dos páginas por ejecución para reducir latencia manteniendo bajo el uso de memoria.
 3. Reduce cada página a 1600 px y la convierte a JPEG de calidad 68 para disminuir memoria y transferencia.
-4. Qwen Vision reconoce únicamente identificadores visibles en texto por líneas, sin recibir el CSV completo ni depender de una salida JSON frágil.
+4. Qwen Vision reconoce únicamente identificadores visibles de dos páginas por solicitud, sin recibir el CSV completo ni depender de una salida JSON frágil.
 5. La aplicación valida cada unidad contra el CSV y genera Markdown estructurado por página.
 
 El PDF original no se modifica: permanece cifrado en Supabase. La optimización es una representación temporal en memoria utilizada únicamente durante el análisis.
