@@ -21,10 +21,6 @@ const Item = z.object({
 
 export const ExtractionSchema = z.object({ items: z.array(Item) });
 
-const VisionOcrSchema = z.object({
-  tokens: z.array(z.string()).default([]),
-});
-
 function groqErrorDetail(payload: unknown) {
   if (!payload || typeof payload !== 'object') return 'unknown';
   const error = (payload as { error?: unknown }).error;
@@ -60,7 +56,7 @@ export async function extractIdentifiersFromImage(
               {
                 type: 'text',
                 text:
-                  'Realiza OCR literal de esta página de un albarán. Devuelve exclusivamente JSON con la forma {"tokens":["..."]}. Incluye todos los números de unidad, códigos alfanuméricos, números de albarán y fechas visibles. No expliques, no inventes y no incluyas texto narrativo.',
+                  'Realiza OCR literal de esta página de un albarán. Devuelve únicamente los números de unidad, códigos alfanuméricos, números de albarán y fechas visibles, un valor por línea. No uses JSON, Markdown ni explicaciones. No inventes valores.',
               },
               {
                 type: 'image_url',
@@ -71,7 +67,6 @@ export async function extractIdentifiersFromImage(
             ],
           },
         ],
-        response_format: { type: 'json_object' },
         reasoning_effort: 'none',
         max_completion_tokens: 300,
         temperature: 0.1,
@@ -96,15 +91,13 @@ export async function extractIdentifiersFromImage(
   }
   const content = payload.choices?.[0]?.message?.content;
   if (!content) throw new Error('GROQ_VISION_EMPTY');
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(content.replace(/^```json\s*|\s*```$/g, ''));
-  } catch {
-    throw new Error('GROQ_VISION_INVALID_JSON');
-  }
-  const result = VisionOcrSchema.safeParse(parsed);
-  if (!result.success) throw new Error('GROQ_VISION_INVALID_OUTPUT');
-  return { tokens: result.data.tokens, model };
+  const tokens = content
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, '').trim())
+    .filter((line) => line.length > 0 && line.length <= 200)
+    .slice(0, 300);
+  if (tokens.length === 0) throw new Error('GROQ_VISION_EMPTY');
+  return { tokens, model };
 }
 
 export async function extractAmbiguousDeliveryData(

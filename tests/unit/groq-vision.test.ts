@@ -14,7 +14,7 @@ describe('Groq vision OCR', () => {
       new Response(
         JSON.stringify({
           choices: [
-            { message: { content: '{"tokens":["2631010001 00","143909"]}' } },
+            { message: { content: '2631010001 00\n143909' } },
           ],
         }),
         { status: 200, headers: { 'content-type': 'application/json' } },
@@ -34,6 +34,7 @@ describe('Groq vision OCR', () => {
       reasoning_effort: 'none',
       max_completion_tokens: 300,
     });
+    expect(body).not.toHaveProperty('response_format');
     expect(body.messages[0].content[1].image_url.url).toMatch(
       /^data:image\/jpeg;base64,/,
     );
