@@ -229,6 +229,11 @@ GitHub Actions ejecuta lint, typecheck, Vitest y build. No guardar `.env.local` 
 
 ## Seguridad operacional
 
+Los documentos pueden archivarse desde la aplicación. Al hacerlo se elimina el
+blob cifrado de Supabase Storage, pero se conservan el registro mínimo, los datos
+extraídos y las conciliaciones para consultar el historial mensual. Aplica la
+migración `0002_document_archiving.sql` antes de usar esta opción.
+
 - No hay buckets públicos ni signed URLs permanentes.
 - El endpoint de descarga/streaming definitivo debe recuperar el blob cifrado, verificar rol, descifrar y responder sin persistir la copia plaintext.
 - Los nombres de Storage usan UUID, no el nombre original.

@@ -12,14 +12,20 @@ const labels: Record<string, string> = {
   DUPLICATE: 'Duplicada',
 };
 
-export default async function ReconciliationsPage() {
+export default async function ReconciliationsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ analysis?: string }>;
+}) {
+  const { analysis } = await searchParams;
   const supabase = await createSupabaseServerClient();
-  const { data: latest } = await supabase
+  let reconciliationQuery = supabase
     .from('reconciliations')
-    .select('id,status,created_at')
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
+    .select('id,status,created_at');
+  reconciliationQuery = analysis
+    ? reconciliationQuery.eq('id', analysis)
+    : reconciliationQuery.order('created_at', { ascending: false }).limit(1);
+  const { data: latest } = await reconciliationQuery.maybeSingle();
   const { data: items, error } = latest
     ? await supabase
         .from('reconciliation_items')
@@ -37,6 +43,12 @@ export default async function ReconciliationsPage() {
   return (
     <>
       <h1>Conciliaciones</h1>
+      {analysis && latest ? (
+        <p className="muted">
+          Análisis histórico del{' '}
+          {new Date(latest.created_at).toLocaleString('es-ES')}
+        </p>
+      ) : null}
       <div className="cards">
         <div className="card critical-card"><small>Facturadas que faltan en albarán</small><h2>{missing.length}</h2></div>
         <div className="card"><small>Otras diferencias</small><h2>{otherDifferences.length}</h2></div>

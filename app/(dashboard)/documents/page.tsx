@@ -1,5 +1,6 @@
 import { DocumentUploadForm } from '@/components/document-upload-form';
 import { DocumentProcessingMonitor } from '@/components/document-processing-monitor';
+import { DocumentDeleteButton } from '@/components/document-delete-button';
 import { createSupabaseServerClient } from '@/lib/supabase/server';
 
 const typeLabels: Record<string, string> = {
@@ -49,11 +50,18 @@ function processingErrorMessage(error: string | null | undefined) {
 
 export default async function DocumentsPage() {
   const supabase = await createSupabaseServerClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  const { data: profile } = user
+    ? await supabase.from('profiles').select('role').eq('id', user.id).single()
+    : { data: null };
   const { data: documents, error } = await supabase
     .from('documents')
     .select(
       'id,original_filename,document_type,size_bytes,status,created_at',
     )
+    .is('deleted_at', null)
     .order('created_at', { ascending: false })
     .limit(100);
   const latestDocuments = [
@@ -132,7 +140,18 @@ export default async function DocumentsPage() {
                     </td>
                     <td>{new Date(document.created_at).toLocaleString('es-ES')}</td>
                     <td>
-                      <a href={`/api/documents/${document.id}/download`}>Descargar</a>
+                      <div className="document-actions">
+                        <a href={`/api/documents/${document.id}/download`}>Descargar</a>
+                        {profile?.role === 'admin' ? (
+                          <DocumentDeleteButton
+                            documentId={document.id}
+                            filename={document.original_filename}
+                            disabled={['extracting', 'analyzing', 'reconciling'].includes(
+                              document.status,
+                            )}
+                          />
+                        ) : null}
+                      </div>
                     </td>
                   </tr>
                 ))}

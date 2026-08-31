@@ -59,6 +59,7 @@ async function claimPair(
     .select(documentFields)
     .eq('uploaded_by', userId)
     .eq('status', sourceStatus)
+    .is('deleted_at', null)
     .in('document_type', ['pdf_support', 'csv_units'])
     .order('created_at', { ascending: false })
     .limit(20);
@@ -75,6 +76,7 @@ async function claimPair(
     .update({ status: 'extracting' })
     .in('id', ids)
     .eq('status', sourceStatus)
+    .is('deleted_at', null)
     .select('id');
   if (claimError) throw new Error(`PAIR_CLAIM_${claimError.message}`);
   if (claimed?.length !== 2) return null;
