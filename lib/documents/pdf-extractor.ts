@@ -21,6 +21,34 @@ export const OCR_MAX_PAGES = 80;
 const OCR_IMAGE_WIDTH = 1_600;
 const OCR_JPEG_QUALITY = 68;
 
+type ExtractionOptions = {
+  signal?: AbortSignal;
+  onOcrProgress?: (completedPages: number, totalPages: number) => Promise<void> | void;
+};
+
+function processingTimeoutError() {
+  return new Error('PROCESSING_TIMEOUT');
+}
+
+async function abortable<T>(promise: Promise<T>, signal?: AbortSignal) {
+  if (!signal) return promise;
+  if (signal.aborted) throw processingTimeoutError();
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(processingTimeoutError());
+    signal.addEventListener('abort', abort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', abort);
+        resolve(value);
+      },
+      (cause) => {
+        signal.removeEventListener('abort', abort);
+        reject(cause);
+      },
+    );
+  });
+}
+
 function normalize(value: string) {
   return value.trim().replace(/\s+/g, ' ').toUpperCase();
 }
@@ -180,6 +208,7 @@ async function extractScannedPdfMatches(
   input: Buffer,
   rows: CSVNormalizedRecord[],
   pageNumbers: number[],
+  options: ExtractionOptions,
 ) {
   if (rows.length === 0 || pageNumbers.length === 0) return null;
   const pdf = await getDocumentProxy(Uint8Array.from(input));
@@ -193,24 +222,28 @@ async function extractScannedPdfMatches(
         (batchIndex + 1) * OCR_BATCH_SIZE,
       ),
   );
+  const totalOcrPages = pageNumbers.length;
   let nextBatch = 0;
+  let completedPages = 0;
   const ocrResults: LocalOcrResult[] = [];
   const ocrPool = await createLocalOcrPool(OCR_CONCURRENCY);
 
   async function worker() {
     while (nextBatch < batches.length) {
+      if (options.signal?.aborted) throw processingTimeoutError();
       const batchIndex = nextBatch++;
-      const pageNumbers = batches[batchIndex];
+      const batchPages = batches[batchIndex];
       const rendered = await Promise.all(
-        pageNumbers.map((pageNumber) => renderCompressedPage(pdf, pageNumber)),
+        batchPages.map((pageNumber) => renderCompressedPage(pdf, pageNumber)),
       );
+      if (options.signal?.aborted) throw processingTimeoutError();
       const started = Date.now();
-      const batch = await ocrPool.recognize(rendered);
+      const batch = await abortable(ocrPool.recognize(rendered), options.signal);
       const originalBytes = rendered.reduce((total, page) => total + page.originalBytes, 0);
       const optimizedBytes = rendered.reduce((total, page) => total + page.optimizedBytes, 0);
       console.info('[automatic-reconciliation] pdf-ocr-batch', {
-        firstPage: pageNumbers[0],
-        lastPage: pageNumbers.at(-1),
+        firstPage: batchPages[0],
+        lastPage: batchPages.at(-1),
         totalPages: pdf.numPages,
         recognizedCharacters: batch.reduce((total, page) => total + page.text.length, 0),
         engine: 'tesseract.js',
@@ -222,6 +255,8 @@ async function extractScannedPdfMatches(
           : 0,
       });
       ocrResults.push(...batch);
+      completedPages += batch.length;
+      await options.onOcrProgress?.(completedPages, totalOcrPages);
     }
   }
 
@@ -243,6 +278,7 @@ async function extractScannedPdfMatches(
 export async function extractDeliveryNotesFromPdf(
   input: Buffer,
   expectedRows: CSVNormalizedRecord[] = [],
+  options: ExtractionOptions = {},
 ) {
   const extracted = await extractText(Uint8Array.from(input));
   const pages: ExtractedPdfPage[] = extracted.text.map((text, index) => ({
@@ -290,7 +326,12 @@ export async function extractDeliveryNotesFromPdf(
     .filter((page) => page.needsOcr)
     .map((page) => page.pageNumber);
   if (ocrPageNumbers.length > 0) {
-    const ocr = await extractScannedPdfMatches(input, expectedRows, ocrPageNumbers);
+    const ocr = await extractScannedPdfMatches(
+      input,
+      expectedRows,
+      ocrPageNumbers,
+      options,
+    );
     if (ocr) {
       ocrAttempted = true;
       for (const note of ocr.notes) notes.set(note.deliveryNoteNumber, note);
@@ -321,6 +362,8 @@ export async function extractDeliveryNotesFromPdf(
           unit_number: row.unitNumber,
         })),
       },
+      true,
+      options.signal,
     );
     aiMetrics = ai.metrics;
 

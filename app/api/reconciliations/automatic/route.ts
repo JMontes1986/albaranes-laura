@@ -4,6 +4,7 @@ import {
   claimPendingPair,
   claimFailedPair,
   processClaimedPair,
+  recoverStaleProcessing,
 } from '@/lib/reconciliation/orchestrator';
 
 export const runtime = 'nodejs';
@@ -26,7 +27,14 @@ export async function POST(request: Request) {
   }
 
   try {
-    const body = (await request.json().catch(() => ({}))) as { retry?: boolean };
+    const body = (await request.json().catch(() => ({}))) as {
+      retry?: boolean;
+      recover?: boolean;
+    };
+    if (body.recover) {
+      const recovered = await recoverStaleProcessing(user.id);
+      return Response.json({ recovered });
+    }
     const pair = body.retry
       ? await claimFailedPair(user.id)
       : await claimPendingPair(user.id);

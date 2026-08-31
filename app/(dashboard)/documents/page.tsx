@@ -36,6 +36,9 @@ function processingErrorMessage(error: string | null | undefined) {
   if (error === 'PDF_OCR_PAGE_LIMIT') {
     return 'El PDF supera el límite de 80 páginas admitido para OCR automático.';
   }
+  if (error === 'PROCESSING_TIMEOUT') {
+    return 'El análisis superó 4 minutos y 30 segundos y fue detenido para evitar que quede bloqueado. Puedes reintentarlo.';
+  }
   if (
     error?.includes('tokens per minute (TPM)') ||
     error?.includes('Request too large for model')
@@ -59,7 +62,7 @@ export default async function DocumentsPage() {
   const { data: documents, error } = await supabase
     .from('documents')
     .select(
-      'id,original_filename,document_type,size_bytes,status,created_at',
+      'id,original_filename,document_type,size_bytes,status,created_at,processing_started_at,processing_progress,processing_stage',
     )
     .is('deleted_at', null)
     .order('created_at', { ascending: false })
@@ -79,6 +82,9 @@ export default async function DocumentsPage() {
     latestDocuments.some((document) =>
       ['extracting', 'analyzing', 'reconciling'].includes(document?.status ?? ''),
     ),
+  );
+  const processingDocument = latestDocuments.find((document) =>
+    ['extracting', 'analyzing', 'reconciling'].includes(document?.status ?? ''),
   );
   const hasFailed = Boolean(
     latestDocuments.some((document) => document?.status === 'failed'),
@@ -106,6 +112,13 @@ export default async function DocumentsPage() {
         isProcessing={isProcessing}
         hasFailed={hasFailed}
         failureReason={processingErrorMessage(failedRun?.error)}
+        processingStartedAt={
+          processingDocument?.processing_started_at ??
+          processingDocument?.created_at ??
+          null
+        }
+        processingProgress={processingDocument?.processing_progress ?? 0}
+        processingStage={processingDocument?.processing_stage ?? null}
       />
       <section className="card documents-list" aria-labelledby="documents-title">
         <h2 id="documents-title">Documentos cargados</h2>

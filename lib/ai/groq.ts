@@ -21,7 +21,11 @@ const Item = z.object({
 
 export const ExtractionSchema = z.object({ items: z.array(Item) });
 
-export async function extractAmbiguousDeliveryData(input: unknown, complex = true) {
+export async function extractAmbiguousDeliveryData(
+  input: unknown,
+  complex = true,
+  abortSignal?: AbortSignal,
+) {
   if (!process.env.GROQ_API_KEY) {
     throw new Error('GROQ_API_KEY missing');
   }
@@ -44,6 +48,7 @@ export async function extractAmbiguousDeliveryData(input: unknown, complex = tru
       'Devuelve las fechas como YYYY-MM-DD. Si un campo no puede determinarse, usa null.',
     prompt: payload,
     temperature: 0,
+    abortSignal,
   });
 
   return {
