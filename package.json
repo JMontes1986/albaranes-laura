@@ -21,7 +21,7 @@
     "chardet": "^2.1.0",
     "decimal.js": "^10.6.0",
     "iconv-lite": "^0.7.0",
-    "next": "^16.3.2",
+    "next": "16.4.1",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "unpdf": "^1.8.1",
@@ -34,7 +34,7 @@
     "@types/react": "^19.1.12",
     "@types/react-dom": "^19.1.9",
     "eslint": "^9.34.0",
-    "eslint-config-next": "^16.3.2",
+    "eslint-config-next": "16.4.1",
     "typescript": "^5.9.2",
     "vitest": "^3.2.4"
   }
